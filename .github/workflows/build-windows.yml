@@ -39,6 +39,7 @@ jobs:
         run: |
           $pkg = "dist/RWS_StressTester"
           foreach ($p in @("RWS_StressTester.exe", "README.txt", "settings.json", "presets.json",
+                           "LICENSE.txt", "THIRD_PARTY_NOTICES.md", "licenses/LibreHardwareMonitor-MPL-2.0.txt",
                            "Engines/y-cruncher/y-cruncher.exe", "Engines/FurMark/furmark.exe",
                            "Engines/DiskSpd/amd64/diskspd.exe",
                            "Engines/LibreHardwareMonitor/LibreHardwareMonitorLib.dll")) {

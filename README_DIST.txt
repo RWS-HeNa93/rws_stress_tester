@@ -11,6 +11,10 @@ while they run, and produces a PDF System Stability Certificate. It controls the
 If every selected test passes, the verdict is CERTIFIED STABLE, whatever the test durations.
 Choosing sensible durations is up to the technician.
 
+WARNING: stress tests push hardware to its thermal and power limits. Run them only on machines
+you are responsible for, with working cooling. The software is provided as is, without warranty
+of any kind (see LICENSE.txt).
+
 
 QUICK START
 -----------
@@ -162,6 +166,9 @@ FILES
 Folder layout
   RWS_StressTester.exe
   README.txt          this guide
+  LICENSE.txt         license for RWS Stress Tester's own code (MIT)
+  THIRD_PARTY_NOTICES.md   licenses of the bundled tools and libraries
+  licenses\           third-party license texts
   settings.json       logo, certificate details, sensor assignments, thermal limits, skin
   presets.json        saved presets
   Engines\            the test tools - do not change or remove
@@ -213,3 +220,15 @@ No PDF or no logo on it
 Logs or reports are not saved
   - The folder must be writable. Do not run it from a read-only location such as a
     write-protected USB stick or a protected system folder.
+
+
+LICENSES
+--------
+RWS Stress Tester's own code is released under the MIT License (LICENSE.txt). The bundled
+tools keep their own licenses, which are listed in THIRD_PARTY_NOTICES.md:
+  y-cruncher            free for non-commercial use; commercial use needs the developer's
+                        permission (http://www.numberworld.org/y-cruncher/license.html)
+  FurMark 2             freeware by Geeks3D (https://www.geeks3d.com/furmark/)
+  DiskSpd               Microsoft Software License Terms (Engines\DiskSpd\EULA)
+  LibreHardwareMonitor  Mozilla Public License 2.0
+  PawnIO                GNU GPL 2.0 or later

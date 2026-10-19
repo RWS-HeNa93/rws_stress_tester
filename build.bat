@@ -145,6 +145,12 @@ if exist "%PROJECT_DIR%README_DIST.txt" (
     echo       Copying packaged README...
     copy /Y "%PROJECT_DIR%README_DIST.txt" "%PACKAGE_DIR%\README.txt" >nul
 )
+if exist "%PROJECT_DIR%LICENSE" (
+    echo       Copying license files...
+    copy /Y "%PROJECT_DIR%LICENSE" "%PACKAGE_DIR%\LICENSE.txt" >nul
+    copy /Y "%PROJECT_DIR%THIRD_PARTY_NOTICES.md" "%PACKAGE_DIR%\THIRD_PARTY_NOTICES.md" >nul
+    xcopy "%PROJECT_DIR%licenses" "%PACKAGE_DIR%\licenses" /E /I /H /Y >nul
+)
 if exist "%PROJECT_DIR%Logotypes" (
     echo       Copying Logotypes...
     xcopy "%PROJECT_DIR%Logotypes" "%PACKAGE_DIR%\Logotypes" /E /I /H /Y >nul
