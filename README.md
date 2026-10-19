@@ -110,7 +110,7 @@ Administrator rights are needed to read hardware sensors. The app uses `Engines\
 | `telemetry.py` | Sensor readings through LibreHardwareMonitor (pythonnet); feeds the thermal kill switch |
 | `eventlog.py` | Watches the Windows System log for hardware errors, driver resets and storage errors during each phase |
 | `report_gen.py` | PDF certificate (reportlab) |
-| `Engines\` | Bundled third-party tools, shipped unchanged except y-cruncher's runtime DLLs (see below) |
+| `Engines\` | Bundled third-party tools, shipped unchanged except y-cruncher's runtime DLLs (see below) and without debugging symbols (`.pdb`) or LibreHardwareMonitor's saved GUI settings |
 | `settings.json`, `presets.json` | Empty defaults copied into the package |
 | `README_DIST.txt` | Operator guide, shipped as `README.txt` |
 | `build.bat` | Builds the `.exe` and assembles `dist\RWS_StressTester\` |

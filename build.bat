@@ -125,6 +125,13 @@ if exist "%PROJECT_DIR%Engines" (
     xcopy "%PROJECT_DIR%Engines" "%PACKAGE_DIR%\Engines" /E /I /H /Y >nul
 )
 
+:: Drop debugging symbols and LibreHardwareMonitor's saved GUI settings, which a local
+:: LibreHardwareMonitor.exe run may have written next to the engines
+if exist "%PACKAGE_DIR%\Engines" (
+    del /S /Q "%PACKAGE_DIR%\Engines\*.pdb" >nul 2>&1
+    del /Q "%PACKAGE_DIR%\Engines\LibreHardwareMonitor\LibreHardwareMonitor.config" >nul 2>&1
+)
+
 :: Copy default config files
 if exist "%PROJECT_DIR%settings.json" (
     echo       Copying settings.json...

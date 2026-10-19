@@ -27,6 +27,11 @@ Engines/FurMark/exports/*
 !Engines/FurMark/exports/_readme.txt
 Engines/FurMark/gpushark/exports/*
 !Engines/FurMark/gpushark/exports/_readme.txt
+# LibreHardwareMonitor GUI settings (sensor history, network adapter IDs, web server credentials)
+Engines/LibreHardwareMonitor/LibreHardwareMonitor.config
+
+# Debugging symbols, not needed to run the engines
+*.pdb
 
 # Logos are added per installation; keep only the folder readme
 Logotypes/*
