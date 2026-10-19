@@ -297,12 +297,31 @@ class TelemetryMonitor:
             try:
                 candidate_dir.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(self.lhm_source_dir, candidate_dir, dirs_exist_ok=True)
+                self._strip_mark_of_the_web(candidate_dir)
                 self._staged_library_dir = candidate_dir
                 return staged_library
             except OSError as exc:
                 last_error = exc
 
         raise RuntimeError(f"Unable to stage LibreHardwareMonitor binaries locally. Last error: {last_error}")
+
+    @staticmethod
+    def _strip_mark_of_the_web(directory: Path) -> None:
+        """Remove the Zone.Identifier stream Windows attaches to files unzipped from a download.
+
+        .NET Framework refuses to load an assembly carrying it (HRESULT 0x80131515,
+        "load an assembly from a network location"), and copying the files keeps the stream.
+        """
+        if os.name != "nt":
+            return
+
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                os.remove(f"{path}:Zone.Identifier")
+            except OSError:
+                pass
 
     def _collect_sensor_inventory(self) -> dict[str, TelemetrySensor]:
         if self._computer is None:

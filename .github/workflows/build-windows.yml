@@ -28,6 +28,26 @@ jobs:
         shell: cmd
         run: .venv\Scripts\python -c "import eventlog, orchestrator, report_gen, telemetry, ui; print('imports ok')"
 
+      # Explorer tags files unzipped from a browser download with a Zone.Identifier stream,
+      # which makes .NET Framework refuse to load them. Mark a scratch copy of the LHM files
+      # that way and check the failure reproduces and telemetry still loads them.
+      - name: Telemetry loads Mark-of-the-Web DLLs
+        shell: pwsh
+        run: |
+          $check = "$env:RUNNER_TEMP/motw-check"
+          New-Item -ItemType Directory -Force "$check/Engines" | Out-Null
+          Copy-Item Engines/LibreHardwareMonitor "$check/Engines/LibreHardwareMonitor" -Recurse
+          Copy-Item telemetry.py $check
+          New-Item -ItemType Directory -Force "$check/.github/scripts" | Out-Null
+          Copy-Item .github/scripts/check_lhm_motw.py "$check/.github/scripts"
+          Get-ChildItem "$check/Engines/LibreHardwareMonitor" -Recurse -File | ForEach-Object {
+            Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          .venv\Scripts\python "$check/.github/scripts/check_lhm_motw.py" repro
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv\Scripts\python "$check/.github/scripts/check_lhm_motw.py" fixed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # build.bat is the single source of truth for the package layout; stdin from nul
       # lets its interactive "pause" prompts return immediately.
       - name: Build with build.bat
