@@ -386,6 +386,7 @@ class StressOrchestrator:
             "telemetry_mappings": DEFAULT_TELEMETRY_MAPPINGS.copy(),
             "cpu_temp_limit_c": CPU_TEMP_LIMIT_C,
             "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
+            "ui_theme": "",  # empty = the UI's default skin
         }
         loaded = self.load_json(self.settings_path, defaults)
         if not isinstance(loaded, dict):
@@ -399,6 +400,7 @@ class StressOrchestrator:
         settings["certificate_machine_name"] = str(loaded.get("certificate_machine_name", "") or "")
         settings["cpu_temp_limit_c"] = self._normalize_temperature_limit(loaded.get("cpu_temp_limit_c"), CPU_TEMP_LIMIT_C)
         settings["gpu_temp_limit_c"] = self._normalize_temperature_limit(loaded.get("gpu_temp_limit_c"), GPU_TEMP_LIMIT_C)
+        settings["ui_theme"] = str(loaded.get("ui_theme", "") or "")
 
         mappings = loaded.get("telemetry_mappings")
         if isinstance(mappings, dict):

@@ -18,9 +18,9 @@ QUICK START
    OK, then extract it. (Otherwise Windows may block the bundled engines.)
 2. Keep the whole folder together. RWS_StressTester.exe needs the Engines\ folder next to it.
 3. Right-click RWS_StressTester.exe > Run as administrator.
-4. First time on a machine: click Assign Sensors and assign at least CPU Temperature and
+4. First time on a machine: click Assign sensors and assign at least CPU Temperature and
    GPU Temperature. Without them the thermal kill switch cannot protect the hardware.
-5. Tick the tests to run, set minutes for each, and press START.
+5. Switch on the tests to run, set minutes for each, and press Start diagnostics.
 6. When the run ends, read the verdict, open any failed phase's log, and collect the PDF
    from the reports\ folder.
 
@@ -39,7 +39,7 @@ CPU
 RAM  - Cap (GB): how much memory to test
   y-cruncher tests FFTv4, VT3, N63 using the chosen amount. Finds unstable RAM, memory
   controller and fabric settings (XMP/EXPO, timings, SoC voltage).
-  The field is prefilled from currently available memory. START is blocked if the value is
+  The field is prefilled from currently available memory. Start is blocked if the value is
   not a number, is zero, or is more than the system can spare.
 
 GPU  - Res: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
@@ -74,7 +74,7 @@ End of a phase
   When the time is up, the timer shows FINISHING while the engines get a short grace period to
   exit on their own (y-cruncher 10 s, FurMark 30 s, DiskSpd up to 120 s) before being stopped.
 
-Warnings before START
+Warnings before the run starts
   - GPU, VRAM or PSU longer than 5 minutes: FurMark is extremely heavy; confirm to continue.
   - CPU or GPU temperature sensor not assigned: the thermal kill switch cannot protect it.
 
@@ -121,34 +121,39 @@ After a crash or power loss
 SCREENS AND WINDOWS
 -------------------
 Setup screen
-  - Thermal Settings and Assign Sensors buttons (see below).
-  - Test cards: tick a card to include that phase.
-  - Preset manager: save the current setup under a name (Save As), Delete, re-apply the
-    selected preset (Load Current), or Reset to defaults. Presets are saved in presets.json.
-  - Stability Certificate: generate a certificate when the tests end, logo (from Logotypes\),
+  - Thermal settings and Assign sensors buttons (see below), with the sensor status next to them.
+  - Retro / Modern: switches the look between the green terminal skin (default) and a neutral
+    modern one. The choice is saved in settings.json; it cannot be changed during a run.
+  - Test phases: one row per test. Switch a row on to include it; the total time is shown
+    at the top of the list.
+  - Presets: save the current setup under a name (Save as), re-apply the selected preset
+    (Load), Delete it, or Reset to defaults. Presets are saved in presets.json.
+  - Certificate: create a PDF certificate when the run ends, logo (from Logotypes\),
     optional customer name and machine name.
-  - START.
+  - Start diagnostics.
 
 Assign Sensors
   Links the hardware sensors found on this PC to the app's readings: CPU and GPU temperature,
   CPU and GPU load, RAM load, storage load, CPU and GPU power. Saved in settings.json.
-  - Refresh Sensors re-scans the hardware.
-  - Install PawnIO Driver appears when CPU temperature needs the PawnIO driver.
+  - Refresh sensors re-scans the hardware.
+  - Install PawnIO driver appears when CPU temperature needs the PawnIO driver.
   - The app warns when assignments are missing, invalid or return no live data.
 
 Thermal Settings
   The CPU and GPU temperatures at which a running test is stopped. They can only be lowered:
   the built-in ceilings (CPU 105 C, GPU 95 C) cannot be exceeded.
 
-Dashboard (after START)
-  - Current phase, error indicator, time left in the phase and in the whole run.
+Dashboard (after Start diagnostics)
+  - Current phase, issue indicator, time left in the phase and in the whole run, and a
+    progress bar for the phase.
   - Live telemetry: CPU/GPU temperature and load, RAM load, storage load, CPU/GPU/total power.
+    Temperature bars turn amber within 15 C of the thermal limit and red within 5 C.
   - Live console with the engines' output; problems are highlighted.
-  - Completed Test Logs: click a finished phase to see its status, exit code, run time,
-    start/finish times, command line and full log. Copy Log, Open Log Folder, and Open Native
-    Log for the engine's own log (y-cruncher, FurMark).
-  - Abort Session stops the run; no certificate is made. Refresh Review reloads the completed
-    logs. Back To Setup is available once the run has ended.
+  - Completed phases: click a finished phase to see its status, exit code, run time,
+    start/finish times, command line and full log. Copy log, Open log folder, and Open engine
+    log for the engine's own log (y-cruncher, FurMark).
+  - Abort session stops the run; no certificate is made. Refresh reloads the completed
+    phases. Back to setup is available once the run has ended.
   - At the end the verdict is shown: CERTIFIED STABLE or UNSTABLE.
 
 
@@ -157,7 +162,7 @@ FILES
 Folder layout
   RWS_StressTester.exe
   README.txt          this guide
-  settings.json       logo, certificate details, sensor assignments, thermal limits
+  settings.json       logo, certificate details, sensor assignments, thermal limits, skin
   presets.json        saved presets
   Engines\            the test tools - do not change or remove
   Logotypes\          put certificate logos (.png, .jpg) here
@@ -188,19 +193,20 @@ The app or an engine does not start
 
 Telemetry shows nothing or Unassigned
   - Run as administrator.
-  - Open Assign Sensors and assign the readings. Assignments are per machine type.
-  - If CPU temperature sensors exist but read nothing, use Install PawnIO Driver.
+  - Open Assign sensors and assign the readings. Assignments are per machine type.
+  - If CPU temperature sensors exist but read nothing, use Install PawnIO driver.
 
 "Windows event log check unavailable" in the log
   - The run still works, but Windows-logged hardware errors are not checked. Run as
     administrator; if it persists, check those errors manually in Event Viewer.
 
 A phase failed
-  - Open it in Completed Test Logs; the [APP] lines at the end give the reason.
+  - Open it under Completed phases; the reasons are listed at the top of the log viewer
+    and in the [APP] lines at the end of the log.
   - Use the table in WHAT FAILS A PHASE to see where to look.
 
 No PDF or no logo on it
-  - Check that "Generate certificate at the completion of the tests" is ticked.
+  - Check that "Create PDF certificate" is ticked.
   - Re-select the logo with Browse if the file was moved.
   - Aborted runs never produce a certificate.
 
