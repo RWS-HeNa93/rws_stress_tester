@@ -51,3 +51,6 @@ ycruncher_diag*
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Local notes
+features-proposals.md
