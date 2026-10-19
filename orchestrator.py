@@ -59,6 +59,8 @@ FURMARK_TEST_KEYS = frozenset({"gpu", "vram", "psu"})
 # FurMark's artifact scanner plugin reports corrupted frames as
 # "*** Artifact found at position: [x ; y] - total artifacts: N - num frames scanned: M ***".
 FURMARK_ARTIFACT_PATTERN = re.compile(r'\bartifact found\b', re.IGNORECASE)
+# FurMark logs the GPU its OpenGL context runs on at startup, e.g. "GL_RENDERER: NVIDIA GeForce 940MX/PCIe/SSE2".
+FURMARK_RENDERER_PATTERN = re.compile(r'GL_RENDERER:\s*(.+)')
 
 # DiskSpd -L latency table row, e.g. "    max |    12.345 |       N/A |    12.345" (milliseconds).
 DISKSPD_MAX_LATENCY_PATTERN = re.compile(r'^\s*max\s*\|(.*)$', re.IGNORECASE)
@@ -256,6 +258,20 @@ def detect_vram_gb() -> float | None:
     return largest / (1024 ** 3) if largest else None
 
 
+def detect_cpu_name() -> str:
+    """Processor brand string, e.g. "AMD Ryzen 7 5800X 8-Core Processor" ("" if unavailable)."""
+    if os.name != "nt":
+        return ""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+            value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+    except OSError:
+        return ""
+    return " ".join(str(value).split())
+
+
 def recommended_vram_test_gb(detected_gb: float | None) -> int:
     """Largest FurMark VRAM test size that leaves VRAM_HEADROOM_GB free (the smallest size if unknown)."""
     if not detected_gb:
@@ -334,6 +350,8 @@ class StressOrchestrator:
         self._state_lock = threading.RLock()
         self.cpu_temp_limit_c = CPU_TEMP_LIMIT_C
         self.gpu_temp_limit_c = GPU_TEMP_LIMIT_C
+        self.cpu_name = detect_cpu_name()
+        self._phase_gpu_name = ""  # GPU FurMark renders on in the current phase, once its log reports it
 
         self.run_id = ""
         self.run_dir: Path | None = None
@@ -658,6 +676,7 @@ class StressOrchestrator:
                     duration_minutes=test.duration_minutes,
                     remaining_seconds=test.duration_minutes * 60,
                     total_remaining_seconds=test.duration_minutes * 60 + upcoming_seconds,
+                    tested_hardware=self._tested_hardware(test),
                 )
                 result = self._run_test(test)
                 self.test_results.append(result)
@@ -690,6 +709,7 @@ class StressOrchestrator:
         with self._state_lock:
             self._phase_issues = []  # reset per-test issues — do NOT inherit from prior phases
             self._phase_max = self._empty_phase_max()
+        self._phase_gpu_name = ""
         self._write_state_file(test.key)
 
         test_started_at = datetime.now()
@@ -744,6 +764,7 @@ class StressOrchestrator:
                     total_remaining_seconds=remaining + upcoming_seconds,
                     finishing=finishing,
                     finishing_remaining_seconds=max(0, int(math.ceil(grace_deadline - now))) if finishing else 0,
+                    tested_hardware=self._tested_hardware(test),
                 )
 
                 for process in processes:
@@ -880,6 +901,7 @@ class StressOrchestrator:
             "native_engine_log_file_path": str(native_log_path) if native_log_path else None,
             "selected_ram_gb": test.ram_gb if test.key == "ram" else 0.0,
             "selected_vram_gb": test.vram_gb if test.key == "vram" else 0,
+            "tested_hardware": dict(self._tested_hardware(test)),
             "phase_issues": phase_issues,
         }
 
@@ -907,6 +929,32 @@ class StressOrchestrator:
             "label": test.label,
             "duration_minutes": test.duration_minutes
         }
+
+    def _tested_hardware(self, test: TestDefinition) -> list[tuple[str, str]]:
+        """The processor and/or graphics card a phase runs on, as (role, name) pairs for the dashboard."""
+        devices: list[tuple[str, str]] = []
+        if test.key in YCRUNCHER_TEST_KEYS:
+            devices.append(("CPU", self.cpu_name or self.telemetry.mapped_hardware_name("cpu_temp") or "Unknown processor"))
+        if test.key in FURMARK_TEST_KEYS:
+            if not self._phase_gpu_name:
+                self._phase_gpu_name = self._read_furmark_renderer(test.key)
+                if self._phase_gpu_name:
+                    self._emit(EVENT_STATUS, message=f"{test.label}: FurMark is rendering on {self._phase_gpu_name}")
+            # Until FurMark has started, show the GPU whose temperature sensor is assigned.
+            devices.append(("GPU", self._phase_gpu_name or self.telemetry.mapped_hardware_name("gpu_temp") or "Detecting..."))
+        return devices
+
+    def _read_furmark_renderer(self, test_key: str) -> str:
+        suffix = self._furmark_log_suffix(test_key)
+        for path in (self.engines_root / "FurMark").glob(f"*{suffix}*.txt"):
+            try:
+                match = FURMARK_RENDERER_PATTERN.search(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if match:
+                # NVIDIA appends the bus and CPU extensions: "NVIDIA GeForce 940MX/PCIe/SSE2".
+                return match.group(1).split("/")[0].strip()
+        return ""
 
     def _start_event_watcher(self, test: TestDefinition, app_notes: list[str]) -> HardwareEventWatcher:
         def on_event(event: HardwareEvent) -> None:

@@ -118,6 +118,13 @@ class TelemetryMonitor:
         with self._telemetry_lock:
             return self._sensor_mappings.copy()
 
+    def mapped_hardware_name(self, category_key: str) -> str:
+        """Name of the hardware behind the sensor assigned to a reading, as of the last poll."""
+        # No lock: both dicts are replaced wholesale, never mutated, and a poll can hold the lock for a while.
+        sensor_id = self._sensor_mappings.get(category_key)
+        sensor = self._last_sensor_inventory.get(sensor_id) if sensor_id else None
+        return sensor.hardware_name if sensor else ""
+
     def list_available_sensors(self) -> list[TelemetrySensor]:
         with self._telemetry_lock:
             self._open_computer()

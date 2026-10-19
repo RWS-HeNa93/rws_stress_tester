@@ -1265,6 +1265,7 @@ class LogViewerModal(ctk.CTkToplevel):
             ("Started", self._format_time(meta.get("started_at", "-"))),
             ("Finished", self._format_time(meta.get("finished_at", "-"))),
         ]
+        fields.extend((str(role), str(name)) for role, name in (meta.get("tested_hardware") or {}).items())
         for index, (label, value) in enumerate(fields):
             cell = ctk.CTkFrame(details_body, fg_color="transparent")
             row, column = divmod(index, 3)
@@ -1974,10 +1975,13 @@ class StressTesterApp(ctk.CTk):
             anchor="w",
         )
         self.phase_label.grid(row=1, column=0, columnspan=2, sticky="w")
+        # Processor / graphics card the current phase runs on, e.g. "GPU  NVIDIA GeForce RTX 3080".
+        self.tested_hardware_label = ctk.CTkLabel(status, text="", font=ui_font(15, "semibold"), text_color=ACCENT, anchor="w", justify="left")
+        self.tested_hardware_label.grid(row=2, column=0, columnspan=2, sticky="w")
         self.error_flag_label = ctk.CTkLabel(status, text="", font=ui_font(12, "semibold"), text_color=DANGER, anchor="w")
-        self.error_flag_label.grid(row=2, column=0, sticky="w", padx=(0, 10))
+        self.error_flag_label.grid(row=3, column=0, sticky="w", padx=(0, 10))
         self.phase_status_label = ctk.CTkLabel(status, text="", font=ui_font(12), text_color=TEXT_MUTED, anchor="w", justify="left")
-        self.phase_status_label.grid(row=2, column=1, sticky="w")
+        self.phase_status_label.grid(row=3, column=1, sticky="w")
 
         timers = ctk.CTkFrame(header, fg_color="transparent")
         timers.grid(row=0, column=1, sticky="e")
@@ -2810,6 +2814,7 @@ class StressTesterApp(ctk.CTk):
         
         self.error_flag_label.configure(text="")
         self.phase_status_label.configure(text="")
+        self.tested_hardware_label.configure(text="")
         self.phase_index_label.configure(text="STARTING")
         self.phase_label.configure(text=display_case("Preparing first phase"), text_color=heading_color())
         self.phase_progress.configure(progress_color=ACCENT)
@@ -2886,6 +2891,9 @@ class StressTesterApp(ctk.CTk):
     def _update_phase(self, event: dict[str, Any]) -> None:
         self.phase_index_label.configure(text=f"PHASE {event['phase_index']} OF {event['total_phases']}")
         self.phase_label.configure(text=display_case(event["label"]), text_color=heading_color())
+        self.tested_hardware_label.configure(
+            text="     ".join(f"{role}  {name}" for role, name in event.get("tested_hardware", []))
+        )
         phase_seconds = max(1.0, float(event.get("duration_minutes", 0) or 0) * 60)
         if event.get("finishing"):
             # Phase duration is over; engines get a short grace period to exit on their own.
@@ -3047,6 +3055,7 @@ class StressTesterApp(ctk.CTk):
         self._load_completed_logs_from_disk()
         verdict = summary["verdict"]
         self.phase_index_label.configure(text="RUN COMPLETE")
+        self.tested_hardware_label.configure(text="")
         self.phase_label.configure(text=verdict, text_color=ACCENT if verdict == "CERTIFIED STABLE" else DANGER)
         self.phase_status_label.configure(text="Review the completed phases on the right.")
         self.phase_progress.configure(progress_color=ACCENT if verdict == "CERTIFIED STABLE" else DANGER)
@@ -3075,6 +3084,7 @@ class StressTesterApp(ctk.CTk):
         self.current_summary = None
         self._append_console(f"[STATUS] {message}")
         self.phase_index_label.configure(text="RUN STOPPED")
+        self.tested_hardware_label.configure(text="")
         self.phase_label.configure(text=display_case("Session aborted"), text_color=WARNING)
         self.phase_status_label.configure(text="Review the engine output and any completed phases.")
         self.phase_progress.configure(progress_color=WARNING)
