@@ -40,11 +40,7 @@ A Windows desktop application that orchestrates hardware stress testing for PC d
    .venv\Scripts\pip install -r requirements.txt
    ```
 
-2. Launch the application:
-   ```batch
-   start.bat
-   ```
-   Or manually:
+2. Launch the application (as Administrator):
    ```batch
    .venv\Scripts\python main.py
    ```
@@ -78,7 +74,13 @@ The project includes a `build.bat` script that automates the entire compilation 
 
 > **Note:** The build uses `--windowed` mode so no console window appears. If you need to see console output for debugging, edit `build.bat` and change `--windowed` to `--console`.
 >
-> `build.bat` regenerates `RWS_StressTester.spec` on every build. `StressTester.spec` is a leftover from an older `--onedir` build with machine-specific paths and is not used.
+> `build.bat` regenerates `RWS_StressTester.spec` on every build, so `.spec` files are not kept in git.
+
+### Building with GitHub Actions
+
+Every push runs `.github/workflows/build-windows.yml` on a Windows runner: it installs the requirements,
+runs `build.bat` and uploads `dist\RWS_StressTester\` as a build artifact (kept for 30 days). Download it
+from the run's page under **Actions**. The workflow can also be started by hand with **Run workflow**.
 
 ---
 

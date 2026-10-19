@@ -1,0 +1,53 @@
+name: Build Windows package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create build virtual environment
+        shell: cmd
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python -m pip install --upgrade pip
+          .venv\Scripts\pip install -r requirements.txt
+
+      - name: Import check
+        shell: cmd
+        run: .venv\Scripts\python -c "import eventlog, orchestrator, report_gen, telemetry, ui; print('imports ok')"
+
+      # build.bat is the single source of truth for the package layout; stdin from nul
+      # lets its interactive "pause" prompts return immediately.
+      - name: Build with build.bat
+        shell: cmd
+        run: call build.bat < nul
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $pkg = "dist/RWS_StressTester"
+          foreach ($p in @("RWS_StressTester.exe", "README.txt", "settings.json", "presets.json",
+                           "Engines/y-cruncher/y-cruncher.exe", "Engines/FurMark/furmark.exe",
+                           "Engines/DiskSpd/amd64/diskspd.exe",
+                           "Engines/LibreHardwareMonitor/LibreHardwareMonitorLib.dll")) {
+            if (-not (Test-Path "$pkg/$p")) { throw "Missing from package: $p" }
+          }
+          Get-Item "$pkg/RWS_StressTester.exe" | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RWS_StressTester-${{ github.sha }}
+          path: dist/RWS_StressTester/
+          retention-days: 30

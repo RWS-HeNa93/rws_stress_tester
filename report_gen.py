@@ -12,9 +12,18 @@ from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Tabl
 
 METHODOLOGY_TEXT = (
     "This system was stress-tested using enterprise-grade workloads. "
-    "The CPU and RAM were tested with y-cruncher, the GPU with FurMark, and storage under sustained load. "
-    "The PSU was validated by simultaneously stressing the CPU and GPU to maximum load. "
+    "The CPU was tested with a mix of y-cruncher computations that verify their own results, covering "
+    "peak boost clocks, maximum heat and power, and load transitions. Memory and the memory controller "
+    "were tested with y-cruncher's large-working-set tests. The GPU was stressed with FurMark while an "
+    "artifact scanner checked rendered frames for corruption; the video memory test fills the selected "
+    "amount of VRAM under the same load. Storage was tested with sustained high-queue-depth random I/O, "
+    "monitored for I/O errors and stalls. The PSU was validated by stressing the CPU and GPU to maximum "
+    "power simultaneously. "
     "Passing these tests indicates strong overall system stability."
+)
+EVENT_LOG_TEXT = (
+    " Throughout every test, the Windows event log was monitored for hardware errors corrected by the "
+    "system (WHEA), graphics driver resets and storage controller errors."
 )
 
 
@@ -52,14 +61,21 @@ def build_stability_report(output_path: Path, settings: dict, summary: dict) -> 
     story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph("Test Pattern Summary", styles["Heading2"]))
-    rows = [["Test", "Duration", "RAM Tested", "Status"]]
+    rows = [["Test", "Duration", "Memory Tested", "Status"]]
     for row in summary["tests"]:
         duration_minutes = row.get("duration_minutes") or 0
         ram_gb = row.get("selected_ram_gb") or 0
+        vram_gb = row.get("selected_vram_gb") or 0
+        if ram_gb:
+            memory = f"{ram_gb:g} GB"
+        elif vram_gb:
+            memory = f"{vram_gb:g} GB VRAM"
+        else:
+            memory = "-"
         rows.append([
             row.get("label") or row.get("test_name", ""),
             f"{duration_minutes} min" if duration_minutes else "-",
-            f"{ram_gb:g} GB" if ram_gb else "-",
+            memory,
             row["status"],
         ])
     summary_table = Table(rows, colWidths=[70 * mm, 25 * mm, 25 * mm, 30 * mm])
@@ -86,7 +102,8 @@ def build_stability_report(output_path: Path, settings: dict, summary: dict) -> 
     story.append(Spacer(1, 5 * mm))
 
     story.append(Paragraph("Methodology", styles["Heading2"]))
-    story.append(Paragraph(METHODOLOGY_TEXT, styles["BodyText"]))
+    methodology = METHODOLOGY_TEXT + (EVENT_LOG_TEXT if summary.get("event_log_monitored") else "")
+    story.append(Paragraph(methodology, styles["BodyText"]))
     story.append(Spacer(1, 4 * mm))
 
     if summary["clean_run"]:

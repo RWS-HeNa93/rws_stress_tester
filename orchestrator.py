@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ from typing import Any
 
 import psutil
 
+from eventlog import HardwareEvent, HardwareEventWatcher, EventLogUnavailable, query_hardware_events
 from report_gen import build_stability_report
 from telemetry import (
     CPU_TEMP_LIMIT_C,
@@ -52,6 +54,51 @@ ERROR_FALSE_POSITIVE = re.compile(
 
 YCRUNCHER_TEST_KEYS = frozenset({"cpu", "ram", "psu"})
 DISKSPD_TEST_KEYS = frozenset({"storage_read", "storage_write"})
+FURMARK_TEST_KEYS = frozenset({"gpu", "vram", "psu"})
+
+# FurMark's artifact scanner plugin reports corrupted frames as
+# "*** Artifact found at position: [x ; y] - total artifacts: N - num frames scanned: M ***".
+FURMARK_ARTIFACT_PATTERN = re.compile(r'\bartifact found\b', re.IGNORECASE)
+
+# DiskSpd -L latency table row, e.g. "    max |    12.345 |       N/A |    12.345" (milliseconds).
+DISKSPD_MAX_LATENCY_PATTERN = re.compile(r'^\s*max\s*\|(.*)$', re.IGNORECASE)
+# A single I/O this slow means the drive or controller stalled (link resets, timeouts, failing media),
+# even when no I/O error is reported. Far above what a healthy drive needs even at queue depth 128.
+STORAGE_STALL_MS = 10_000.0
+
+# y-cruncher stress schedules, ranked by how much each test contributes. Short phases keep only the
+# top-ranked tests so each one still gets YCRUNCHER_MIN_SLICE_SECONDS (see select_ycruncher_tests).
+YCRUNCHER_SCHEDULES: dict[str, tuple[str, ...]] = {
+    # Core/voltage stability:
+    # SFTv4      in-cache FFT, maximum heat and power; catches the most core instability
+    # BKT        light scalar work at peak boost clocks, where undervolts / Curve Optimizer fail
+    # VT3        larger working set, vector float
+    # SNT, SVT   more in-cache maximum-power work with different instruction mixes
+    # NTT63      larger working set, vector integer
+    # Switching between tests also produces load transients that expose weak voltage regulation.
+    "cpu": ("SFTv4", "BKT", "VT3", "SNT", "SVT", "NTT63"),
+    # Memory/IMC stability: FFTv4 is the most memory-bound test and the most sensitive to unstable
+    # RAM timings, memory-controller and fabric settings; VT3 and NTT63 add other access patterns.
+    "ram": ("FFTv4", "VT3", "NTT63"),
+    # Maximum sustained CPU power alongside FurMark: in-cache tests only, no memory stalls.
+    "psu": ("SFTv4", "SNT", "SVT"),
+}
+# Each test needs several verified iterations (and some heat soak) to be worth running; large-memory
+# RAM iterations take much longer than in-cache CPU ones.
+YCRUNCHER_MIN_SLICE_SECONDS = {"cpu": 60, "ram": 120, "psu": 60}
+# The order y-cruncher itself runs enabled tests in; used to list the selected tests in run order.
+YCRUNCHER_RUN_ORDER = ("BKT", "BBP", "SFTv4", "SNT", "SVT", "FFTv4", "NTT63", "VT3")
+
+# FurMark --furmark-vram-test-gb sizes (OpenGL demo only). The VRAM phase fills this much video
+# memory with FurMark data while rendering, so faulty memory shows up as artifacts or a driver crash.
+FURMARK_VRAM_TEST_SIZES_GB = (2, 4, 6, 8, 10, 12, 16, 20, 24, 32)
+# Left free for the driver, the desktop and FurMark's own buffers. Data that does not fit spills
+# into system RAM over PCIe, which then gets tested instead of the VRAM.
+VRAM_HEADROOM_GB = 1.0
+
+# DiskSpd test file: large enough to get past SSD DRAM/SLC caches, bounded by free space.
+DISKSPD_MAX_FILE_GIB = 8
+DISKSPD_FREE_SPACE_FRACTION = 0.2
 
 THERMAL_ABORT_MESSAGE = "Thermal Failure - Aborted"
 CRASH_STATUS = "FAILED (System Crash)"
@@ -62,6 +109,15 @@ YCRUNCHER_PER_TEST_SECONDS = 300
 # Engines finish on their own slightly after the phase deadline (startup time, DiskSpd warmup,
 # final summaries). Give them this long to exit cleanly before they are killed.
 PROCESS_EXIT_GRACE_SECONDS = 60
+# Per-engine override; a phase waits for the longest of its engines.
+# - DiskSpd prints its whole result summary (including error counts) only at the end, after a 5 s warm-up.
+# - FurMark's --max-time starts counting after its own startup, so it exits a few seconds late.
+# - y-cruncher does not stop at -TL (it starts another test), so waiting longer only adds unplanned load.
+ENGINE_EXIT_GRACE_SECONDS = {
+    "diskspd.exe": 120,  # also covers creating the multi-GB test file on slow drives
+    "furmark.exe": 30,
+    "y-cruncher.exe": 10,
+}
 # An engine that exits this many seconds before the phase deadline did not run the full test.
 PREMATURE_EXIT_TOLERANCE_SECONDS = 5
 # How long the log writer keeps draining engine output after the phase has been stopped.
@@ -69,6 +125,40 @@ MONITOR_DRAIN_SECONDS = 5.0
 PROCESS_KILL_WAIT_SECONDS = 5.0
 
 RUN_ID_PATTERN = re.compile(r"^\d{8}_\d{6}$")
+
+# Windows status codes a process ends with when it crashes or is killed, rather than reporting
+# a failed test itself. Exit codes are shown as negative numbers or huge unsigned ones otherwise.
+WINDOWS_EXIT_CODES = {
+    0xC0000005: "access violation - the program crashed reading or writing invalid memory",
+    0xC0000006: "in-page error - the program could not be read from disk (failing drive or USB stick?)",
+    0xC000001D: "illegal instruction - the CPU ran an instruction it does not support, or the CPU is unstable",
+    0xC0000094: "integer divide by zero",
+    0xC0000096: "privileged instruction",
+    0xC00000FD: "stack overflow",
+    0xC0000135: "a required DLL was not found",
+    0xC0000139: "a DLL function was not found (DLL version mismatch)",
+    0xC0000142: "a DLL failed to initialize",
+    0xC000013A: "terminated by Ctrl+C or console close",
+    0xC0000374: "heap corruption",
+    0xC0000409: "the program aborted itself after detecting memory corruption (fail-fast)",
+    0xC0000417: "invalid parameter passed to the C runtime",
+    0xC0000420: "assertion failure",
+    0x80000003: "breakpoint - the program stopped itself deliberately",
+}
+
+
+def describe_exit_code(rc: int | None) -> str:
+    """Readable form of a process exit code, e.g. '0xC0000005 (access violation - ...)'."""
+    if rc is None:
+        return "none (still running when stopped)"
+    unsigned = rc & 0xFFFFFFFF
+    if unsigned in WINDOWS_EXIT_CODES:
+        return f"0x{unsigned:08X} ({WINDOWS_EXIT_CODES[unsigned]})"
+    if unsigned >= 0xC0000000:
+        return f"0x{unsigned:08X} (crashed with an unrecognized Windows error)"
+    if rc == 0:
+        return "0 (success)"
+    return f"{rc} (error code reported by the engine)"
 
 EVENT_LOG = "log"
 EVENT_STATUS = "status"
@@ -99,8 +189,79 @@ def is_error_line(line: str, test_key: str) -> bool:
         return True
     if test_key in DISKSPD_TEST_KEYS and DISKSPD_ERROR_PATTERN.search(lowered):
         return True
+    if test_key in DISKSPD_TEST_KEYS and _is_storage_stall(lowered):
+        return True
+    if test_key in FURMARK_TEST_KEYS and FURMARK_ARTIFACT_PATTERN.search(lowered):
+        return True
 
     return bool(ERROR_PATTERN.search(lowered))
+
+
+def select_ycruncher_tests(test_key: str, duration_seconds: float) -> tuple[str, ...]:
+    """Highest-ranked tests that fit the phase at the minimum slice each, in y-cruncher's run order."""
+    ranked = YCRUNCHER_SCHEDULES[test_key]
+    fit = int(duration_seconds // YCRUNCHER_MIN_SLICE_SECONDS[test_key])
+    selected = ranked[: max(1, min(len(ranked), fit))]
+    return tuple(sorted(selected, key=YCRUNCHER_RUN_ORDER.index))
+
+
+def _is_storage_stall(line: str) -> bool:
+    match = DISKSPD_MAX_LATENCY_PATTERN.match(line)
+    if not match:
+        return False
+    for cell in match.group(1).split("|"):
+        try:
+            if float(cell.strip()) >= STORAGE_STALL_MS:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def detect_vram_gb() -> float | None:
+    """Dedicated video memory of the largest display adapter, from the driver's registry entries."""
+    if os.name != "nt":
+        return None
+    import winreg
+
+    class_key = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    largest = 0
+    try:
+        adapters = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, class_key)
+    except OSError:
+        return None
+    with adapters:
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(adapters, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                with winreg.OpenKey(adapters, name) as adapter:
+                    # qwMemorySize is exact; the older MemorySize value tops out at 4 GB.
+                    for value_name in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                        try:
+                            value, _ = winreg.QueryValueEx(adapter, value_name)
+                        except OSError:
+                            continue
+                        if isinstance(value, bytes):
+                            value = int.from_bytes(value[:8], "little")
+                        if isinstance(value, int) and value > 0:
+                            largest = max(largest, value)
+                            break
+            except OSError:
+                continue
+    return largest / (1024 ** 3) if largest else None
+
+
+def recommended_vram_test_gb(detected_gb: float | None) -> int:
+    """Largest FurMark VRAM test size that leaves VRAM_HEADROOM_GB free (the smallest size if unknown)."""
+    if not detected_gb:
+        return FURMARK_VRAM_TEST_SIZES_GB[0]
+    fitting = [size for size in FURMARK_VRAM_TEST_SIZES_GB if size <= detected_gb - VRAM_HEADROOM_GB]
+    return fitting[-1] if fitting else FURMARK_VRAM_TEST_SIZES_GB[0]
 
 
 @dataclass
@@ -111,6 +272,7 @@ class TestDefinition:
     ram_gb: float = 0.0
     target_drive: str = ""
     gpu_resolution: str = "1280x720"
+    vram_gb: int = 0
 
 
 @dataclass
@@ -131,6 +293,7 @@ class SessionSummary:
     run_id: str = ""
     started_at: str = ""
     machine_name: str = ""
+    event_log_monitored: bool = False
 
 
 class StressOrchestrator:
@@ -177,6 +340,11 @@ class StressOrchestrator:
         self.logs_dir: Path | None = None
         self.started_at: datetime | None = None
         self.generate_report = True
+        # Windows event log watching: each phase covers the time since the previous phase's last check,
+        # and every event is reported once per session.
+        self._event_watermark: datetime | None = None
+        self._seen_event_ids: set[int] = set()
+        self._event_log_unavailable_reported = False
 
     def load_json(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -305,9 +473,21 @@ class StressOrchestrator:
             # means the machine went down while it was being written.
             payload = {"status": "running", "current_test": "", "run_id": ""}
 
+        payload["windows_events"] = self._crash_windows_events(str(payload.get("run_id", "") or ""))
         payload["summary_path"] = self._reconstruct_crashed_run(payload)
         self.clear_state_file()
         return payload
+
+    @staticmethod
+    def _crash_windows_events(run_id: str) -> list[str]:
+        """What Windows logged since the crashed run started: hardware errors, blue screens, power loss."""
+        if not RUN_ID_PATTERN.match(run_id):
+            return []
+        try:
+            events = query_hardware_events(datetime.strptime(run_id, "%Y%m%d_%H%M%S"))
+        except (EventLogUnavailable, ValueError):
+            return []
+        return [event.describe() for event in events]
 
     def _reconstruct_crashed_run(self, state: dict[str, Any]) -> str:
         run_id = str(state.get("run_id", "") or "")
@@ -333,6 +513,7 @@ class StressOrchestrator:
                 "log_file_path": entry.get("log_file_path", ""),
                 "native_engine_log_file_path": entry.get("native_engine_log_file_path"),
                 "selected_ram_gb": entry.get("selected_ram_gb", 0.0),
+                "selected_vram_gb": entry.get("selected_vram_gb", 0),
             }
             for entry in (completed if isinstance(completed, list) else [])
             if isinstance(entry, dict)
@@ -351,10 +532,13 @@ class StressOrchestrator:
             }
         )
 
+        windows_events = [str(line) for line in state.get("windows_events") or []]
         if crashed_log is not None:
             try:
                 with open(crashed_log, "a", encoding="utf-8") as handle:
                     handle.write(f"[APP] {crash_note}\n")
+                    for line in windows_events:
+                        handle.write(f"[APP] {line}\n")
             except OSError:
                 pass
 
@@ -371,7 +555,7 @@ class StressOrchestrator:
                     "verdict": "UNSTABLE",
                     "clean_run": False,
                     "crash_recovered": True,
-                    "issues": [crash_note],
+                    "issues": [crash_note, *windows_events],
                     "tests": tests,
                 },
             )
@@ -387,11 +571,11 @@ class StressOrchestrator:
         except OSError:
             pass
 
-    def start_session(self, selections: dict[str, int], settings: dict[str, Any], ram_gb: float = 0.0, target_drive: str = "", gpu_resolution: str = "1280x720", generate_report: bool = True) -> None:
+    def start_session(self, selections: dict[str, int], settings: dict[str, Any], ram_gb: float = 0.0, target_drive: str = "", gpu_resolution: str = "1280x720", generate_report: bool = True, vram_gb: int = 0) -> None:
         if self.session_thread and self.session_thread.is_alive():
             raise RuntimeError("A diagnostics session is already running.")
 
-        planned_tests = self._build_plan(selections, ram_gb, target_drive, gpu_resolution)
+        planned_tests = self._build_plan(selections, ram_gb, target_drive, gpu_resolution, vram_gb)
 
         self.configure_telemetry(settings.get("telemetry_mappings"))
         self.configure_thermal_limits(settings)
@@ -401,6 +585,9 @@ class StressOrchestrator:
         self.logs_dir = self.run_dir / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.started_at = datetime.now()
+        self._event_watermark = self.started_at
+        self._seen_event_ids = set()
+        self._event_log_unavailable_reported = False
 
         self.stop_event.clear()
         self.manual_abort = False
@@ -513,9 +700,11 @@ class StressOrchestrator:
         line_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
         monitor_done = threading.Event()
         self.engine_monitor_thread = None
+        event_watcher: HardwareEventWatcher | None = None
 
         try:
             commands = self._build_commands(test, str(native_log_path) if native_log_path else "")
+            event_watcher = self._start_event_watcher(test, app_notes)
             processes = self._launch_test_processes(commands)
 
             # Start our background thread to drain logs and write to file
@@ -530,7 +719,11 @@ class StressOrchestrator:
             phase_seconds = test.duration_minutes * 60
             launch_time = time.monotonic()
             deadline = launch_time + phase_seconds
-            grace_deadline = deadline + PROCESS_EXIT_GRACE_SECONDS
+            grace_seconds = max(
+                ENGINE_EXIT_GRACE_SECONDS.get(Path(command[0]).name.lower(), PROCESS_EXIT_GRACE_SECONDS)
+                for command in commands
+            )
+            grace_deadline = deadline + grace_seconds
             grace_announced = False
             exit_checked: set[int] = set()
 
@@ -538,6 +731,7 @@ class StressOrchestrator:
                 now = time.monotonic()
                 remaining = max(0, int(math.ceil(deadline - now)))
                 upcoming_seconds = sum(t.duration_minutes * 60 for t in self.planned_tests[self.active_phase_index:])
+                finishing = now >= deadline
                 self._emit(
                     EVENT_PHASE,
                     phase_index=self.active_phase_index,
@@ -546,6 +740,8 @@ class StressOrchestrator:
                     duration_minutes=test.duration_minutes,
                     remaining_seconds=remaining,
                     total_remaining_seconds=remaining + upcoming_seconds,
+                    finishing=finishing,
+                    finishing_remaining_seconds=max(0, int(math.ceil(grace_deadline - now))) if finishing else 0,
                 )
 
                 for process in processes:
@@ -555,7 +751,14 @@ class StressOrchestrator:
                     exit_checked.add(process.pid)
                     engine = Path(process.args[0]).name if isinstance(process.args, list) else str(process.args)
                     if rc != 0:
-                        self._flag_phase_issue(f"{test.label}: {engine} exited with code {rc}.", app_notes)
+                        if now >= deadline:
+                            when = f"{int(now - deadline)}s after completing the full {phase_seconds}s test"
+                        else:
+                            when = f"after {int(now - launch_time)}s of the planned {phase_seconds}s test"
+                        self._flag_phase_issue(
+                            f"{test.label}: {engine} exited {when} with code {describe_exit_code(rc)}.",
+                            app_notes,
+                        )
                     elif deadline - now > PREMATURE_EXIT_TOLERANCE_SECONDS:
                         ran_for = int(now - launch_time)
                         self._flag_phase_issue(
@@ -569,8 +772,20 @@ class StressOrchestrator:
                     break
                 if now >= deadline and not grace_announced:
                     grace_announced = True
-                    self._emit(EVENT_STATUS, message=f"{test.label}: duration reached, waiting for engines to finish...")
+                    self._emit(
+                        EVENT_STATUS,
+                        message=f"{test.label}: duration reached, finishing (waiting up to {grace_seconds}s for engines to exit)...",
+                    )
                 time.sleep(1)
+
+            self._stop_event_watcher(event_watcher)
+            if event_watcher.suppressed and not self.manual_abort:
+                self._flag_phase_issue(
+                    f"{test.label}: Windows logged {event_watcher.suppressed} more hardware/driver event(s) "
+                    "not listed here; see Event Viewer > Windows Logs > System.",
+                    app_notes,
+                )
+            event_watcher = None
 
             for process in processes:
                 collected_exit_codes.append(process.poll())
@@ -595,6 +810,8 @@ class StressOrchestrator:
 
         finally:
             self._stop_active_processes()
+            if event_watcher is not None:
+                self._stop_event_watcher(event_watcher)
             with self._state_lock:
                 if THERMAL_ABORT_MESSAGE in self._phase_issues:
                     app_notes.append(THERMAL_ABORT_MESSAGE)
@@ -608,6 +825,23 @@ class StressOrchestrator:
             if test.key in DISKSPD_TEST_KEYS:
                 self._cleanup_diskspd_target(test.target_drive)
             self.clear_state_file()
+
+        if test.key in FURMARK_TEST_KEYS and commands:
+            furmark_log_path, artifact_lines = self._collect_furmark_log(test.key, test_started_at)
+            if test.key in ("gpu", "vram") and furmark_log_path is not None:
+                native_log_path = furmark_log_path
+            with self._state_lock:
+                already_flagged = any(FURMARK_ARTIFACT_PATTERN.search(issue) for issue in self._phase_issues)
+            if artifact_lines and not already_flagged and not self.manual_abort:
+                late_notes: list[str] = []
+                self._flag_phase_issue(
+                    f"{test.label}: FurMark artifact scanner reported rendering errors "
+                    f"({len(artifact_lines)} report(s)): {artifact_lines[-1]}",
+                    late_notes,
+                )
+                self._append_notes_to_log(app_log_path, late_notes)
+                if status == "PASSED":
+                    status = "FAILED"
 
         test_finished_at = datetime.now()
         duration_seconds = (test_finished_at - test_started_at).total_seconds()
@@ -643,6 +877,7 @@ class StressOrchestrator:
             "log_file_path": str(app_log_path),
             "native_engine_log_file_path": str(native_log_path) if native_log_path else None,
             "selected_ram_gb": test.ram_gb if test.key == "ram" else 0.0,
+            "selected_vram_gb": test.vram_gb if test.key == "vram" else 0,
             "phase_issues": phase_issues,
         }
 
@@ -665,10 +900,40 @@ class StressOrchestrator:
             "max_gpu_temp_c": phase_max["gpu_temp"],
             "max_ram_percent": phase_max["ram_load"],
             "selected_ram_gb": meta["selected_ram_gb"],
+            "selected_vram_gb": meta["selected_vram_gb"],
             "key": test.key,
             "label": test.label,
             "duration_minutes": test.duration_minutes
         }
+
+    def _start_event_watcher(self, test: TestDefinition, app_notes: list[str]) -> HardwareEventWatcher:
+        def on_event(event: HardwareEvent) -> None:
+            if not self.manual_abort:
+                self._flag_phase_issue(f"{test.label}: {event.describe()}", app_notes)
+
+        def on_unavailable(reason: str) -> None:
+            if self._event_log_unavailable_reported:
+                return
+            self._event_log_unavailable_reported = True
+            message = f"Windows event log check unavailable, hardware errors logged by Windows are not monitored: {reason}"
+            app_notes.append(f"[APP] {message}")
+            self._emit(EVENT_STATUS, message=message)
+
+        watcher = HardwareEventWatcher(
+            since=self._event_watermark or datetime.now(),
+            on_event=on_event,
+            on_unavailable=on_unavailable,
+            seen_record_ids=self._seen_event_ids,
+            query=query_hardware_events,
+        )
+        watcher.start()
+        return watcher
+
+    def _stop_event_watcher(self, watcher: HardwareEventWatcher) -> None:
+        # The next phase picks up from here, so events between phases are not missed.
+        checked_at = datetime.now()
+        watcher.stop()
+        self._event_watermark = checked_at
 
     def _flag_phase_issue(self, message: str, app_notes: list[str]) -> None:
         self._record_issue(message)
@@ -903,6 +1168,7 @@ class StressOrchestrator:
             issues=issues or ["No issues recorded."],
             clean_run=clean_run,
             verdict=verdict,
+            event_log_monitored=os.name == "nt" and not self._event_log_unavailable_reported,
             **maxima,
         )
 
@@ -974,17 +1240,20 @@ class StressOrchestrator:
         sanitized = sanitized.rstrip(".")
         return sanitized
 
-    def _build_plan(self, selections: dict[str, int], ram_gb: float, target_drive: str, gpu_resolution: str) -> list[TestDefinition]:
+    def _build_plan(self, selections: dict[str, int], ram_gb: float, target_drive: str, gpu_resolution: str, vram_gb: int = 0) -> list[TestDefinition]:
         catalog = self._test_catalog()
         plan = []
-        for key in ("cpu", "ram", "gpu", "storage_read", "storage_write", "psu"):
+        for key in ("cpu", "ram", "gpu", "vram", "storage_read", "storage_write", "psu"):
             duration = int(selections.get(key, 0) or 0)
             if duration > 0:
-                plan.append(TestDefinition(key=key, label=catalog[key], duration_minutes=duration, ram_gb=ram_gb, target_drive=target_drive, gpu_resolution=gpu_resolution))
+                plan.append(TestDefinition(key=key, label=catalog[key], duration_minutes=duration, ram_gb=ram_gb, target_drive=target_drive, gpu_resolution=gpu_resolution, vram_gb=vram_gb))
         if not plan:
             raise RuntimeError("Select at least one test with a duration greater than zero.")
         if any(test.key == "ram" for test in plan) and not (math.isfinite(ram_gb) and ram_gb > 0):
             raise RuntimeError("RAM to test must be a number greater than zero.")
+        if any(test.key == "vram" for test in plan) and vram_gb not in FURMARK_VRAM_TEST_SIZES_GB:
+            sizes = ", ".join(str(size) for size in FURMARK_VRAM_TEST_SIZES_GB)
+            raise RuntimeError(f"VRAM to test must be one of: {sizes} GB.")
         return plan
 
     @staticmethod
@@ -993,6 +1262,7 @@ class StressOrchestrator:
             "cpu": "CPU Stress",
             "ram": "RAM Stress",
             "gpu": "GPU Stress",
+            "vram": "GPU Memory (VRAM) Stress",
             "storage_read": "Storage Stress (Read)",
             "storage_write": "Storage Stress (Write)",
             "psu": "PSU / System Stress",
@@ -1001,23 +1271,25 @@ class StressOrchestrator:
     def _build_commands(self, test: TestDefinition, native_log: str) -> list[list[str]]:
         seconds = test.duration_minutes * 60
         if test.key == "cpu":
-            return [self._build_ycruncher_command(seconds, native_log, memory_mb=None, algorithms=["FFTv4", "NTT63", "VT3"])]
+            return [self._build_ycruncher_command(seconds, native_log, memory_mb=None, algorithms=select_ycruncher_tests("cpu", seconds))]
         if test.key == "ram":
-            return [self._build_ycruncher_command(seconds, native_log, memory_mb=int(test.ram_gb * 1024), algorithms=["FFTv4", "VT3"])]
+            return [self._build_ycruncher_command(seconds, native_log, memory_mb=int(test.ram_gb * 1024), algorithms=select_ycruncher_tests("ram", seconds))]
         if test.key == "gpu":
-            return [self._build_furmark_command(seconds, test.gpu_resolution)]
+            return [self._build_furmark_command(seconds, test.gpu_resolution, self._furmark_log_suffix(test.key))]
+        if test.key == "vram":
+            return [self._build_furmark_command(seconds, test.gpu_resolution, self._furmark_log_suffix(test.key), vram_gb=test.vram_gb)]
         if test.key == "storage_read":
             return [self._build_diskspd_command(seconds, is_write=False, target_drive=test.target_drive)]
         if test.key == "storage_write":
             return [self._build_diskspd_command(seconds, is_write=True, target_drive=test.target_drive)]
         if test.key == "psu":
             return [
-                self._build_ycruncher_command(seconds, native_log, memory_mb=None, algorithms=["FFTv4", "NTT63", "VT3"]),
-                self._build_furmark_command(seconds, test.gpu_resolution),
+                self._build_ycruncher_command(seconds, native_log, memory_mb=None, algorithms=select_ycruncher_tests("psu", seconds)),
+                self._build_furmark_command(seconds, test.gpu_resolution, self._furmark_log_suffix(test.key)),
             ]
         raise RuntimeError(f"Unsupported test: {test.key}")
 
-    def _build_ycruncher_command(self, duration_seconds: int, native_log: str, memory_mb: int | None, algorithms: list[str]) -> list[str]:
+    def _build_ycruncher_command(self, duration_seconds: int, native_log: str, memory_mb: int | None, algorithms: tuple[str, ...]) -> list[str]:
         executable = self.engines_root / "y-cruncher" / "y-cruncher.exe"
         command = [
             str(executable),
@@ -1028,10 +1300,12 @@ class StressOrchestrator:
         if native_log:
             command.append(f"logfile:{native_log}")
 
-        # -D is per algorithm; using the whole phase duration would run only the first algorithm.
+        # -D is per algorithm. Split the phase across all of them so short phases run the whole
+        # schedule instead of spending the entire run in the first test.
+        per_test_seconds = max(1, min(YCRUNCHER_PER_TEST_SECONDS, duration_seconds // max(1, len(algorithms))))
         command.extend([
             "stress",
-            f"-D:{min(YCRUNCHER_PER_TEST_SECONDS, duration_seconds)}",
+            f"-D:{per_test_seconds}",
             f"-TL:{duration_seconds}",
         ])
 
@@ -1050,11 +1324,17 @@ class StressOrchestrator:
             return None
         return int(match.group(1)), int(match.group(2))
 
-    def _build_furmark_command(self, duration_seconds: int, resolution: str) -> list[str]:
+    def _furmark_log_suffix(self, test_key: str) -> str:
+        return f"_{self.run_id}_{test_key}"
+
+    def _build_furmark_command(self, duration_seconds: int, resolution: str, log_suffix: str, vram_gb: int = 0) -> list[str]:
         executable = self.engines_root / "FurMark" / "furmark.exe"
         width, height = self.parse_resolution(resolution) or (1280, 720)
 
-        return [
+        # The artifact scanner checks rendered frames for corruption: the GPU equivalent of
+        # y-cruncher's result verification. Its reports can go to FurMark's own log file rather
+        # than stdout, so traces stay enabled (with a per-run suffix) and the log is collected.
+        command = [
             str(executable),
             "--demo",
             "furmark-gl",
@@ -1065,13 +1345,20 @@ class StressOrchestrator:
             "--max-time",
             str(duration_seconds),
             "--no-score-box",
-            "--disable-traces",
+            "--artifact-scanner",
+            "--logfile-suffix",
+            log_suffix,
             "--gpu-monitor-print",
             "--no-osi",
             "--no-resize",
             "--hpgfx",
-            "1"
+            "1",
         ]
+        if vram_gb:
+            # Fills that much video memory with FurMark data, read back every frame; corrupted memory
+            # shows up as artifacts. Only the OpenGL demo supports it.
+            command.extend(["--furmark-vram-test-gb", str(vram_gb)])
+        return command
 
     @staticmethod
     def _diskspd_target_dir(target_drive: str) -> Path:
@@ -1084,24 +1371,66 @@ class StressOrchestrator:
         temp_dir.mkdir(parents=True, exist_ok=True)
         target = temp_dir / "diskspd_testfile.dat"
 
-        write_flag = "-w100" if is_write else "-w0"
+        # A small file is served from the drive's DRAM/SLC cache and never loads the flash or
+        # the controller for long; size it up to DISKSPD_MAX_FILE_GIB within the free space.
+        free_gib = shutil.disk_usage(temp_dir).free / (1024 ** 3)
+        file_gib = int(max(1, min(DISKSPD_MAX_FILE_GIB, free_gib * DISKSPD_FREE_SPACE_FRACTION)))
 
-        return [
+        command = [
             str(executable),
             "-b64K",
-            "-o4",
-            "-t2",
+            # 4 threads x 32 outstanding I/Os saturates NVMe drives (the old 2 x 4 left them idle),
+            # which is what brings out thermal throttling and controller or link instability.
+            "-o32",
+            "-t4",
             "-r",
             f"-d{duration_seconds}",
             "-Sh",
-            write_flag,
+            "-w100" if is_write else "-w0",
             "-L",
-            "-c1G",
-            str(target),
+            f"-c{file_gib}G",
         ]
+        if is_write:
+            # Random, incompressible data so compressing/deduplicating controllers do real work.
+            command.append("-Z1M")
+        command.append(str(target))
+        return command
+
+    def _collect_furmark_log(self, test_key: str, started_at: datetime) -> tuple[Path | None, list[str]]:
+        """Move FurMark's own log for this phase into the run's logs and return any artifact reports."""
+        furmark_dir = self.engines_root / "FurMark"
+        suffix = self._furmark_log_suffix(test_key)
+        started = started_at.timestamp()
+
+        def modified(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        candidates = [path for path in furmark_dir.glob("*.txt") if suffix in path.name]
+        per_run_file = bool(candidates)
+        if not candidates:
+            # Fall back to the default log name in case the suffix was not applied.
+            candidates = [path for path in furmark_dir.glob("_furmark_log*.txt") if modified(path) >= started]
+        if not candidates:
+            return None, []
+
+        source = max(candidates, key=modified)
+        destination = self.logs_dir / f"{test_key}_furmark.log"
+        try:
+            if per_run_file:
+                shutil.move(str(source), str(destination))  # don't pile per-run logs up in Engines\FurMark
+            else:
+                shutil.copyfile(source, destination)
+            text = destination.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self._emit(EVENT_STATUS, message=f"Could not collect the FurMark log: {exc}")
+            return None, []
+        return destination, [line.strip() for line in text.splitlines() if FURMARK_ARTIFACT_PATTERN.search(line)]
 
     def _cleanup_diskspd_target(self, target_drive: str) -> None:
-        # Don't leave a 1 GB scratch file on the customer's drive.
+        # Don't leave a multi-GB scratch file on the customer's drive.
         temp_dir = self._diskspd_target_dir(target_drive)
         try:
             (temp_dir / "diskspd_testfile.dat").unlink()

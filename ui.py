@@ -15,6 +15,7 @@ import psutil
 from PIL import Image, ImageDraw, ImageOps
 
 from orchestrator import (
+    describe_exit_code,
     EVENT_ABORTED,
     EVENT_ALERT,
     EVENT_FINISHED,
@@ -23,9 +24,13 @@ from orchestrator import (
     EVENT_STATUS,
     EVENT_TELEMETRY,
     EVENT_PHASE_LOGS,
+    FURMARK_VRAM_TEST_SIZES_GB,
     STDERR_PREFIX,
     StressOrchestrator,
+    VRAM_HEADROOM_GB,
+    detect_vram_gb,
     is_error_line,
+    recommended_vram_test_gb,
 )
 from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES
 
@@ -1321,7 +1326,7 @@ class LogViewerModal(ctk.CTkToplevel):
         left_meta = [
             ("ENGINE:", self._format_engine_name(meta.get("engine_name", "-"))),
             ("STATUS:", str(meta.get("status", "-"))),
-            ("EXIT CODE:", str(meta.get("exit_code", "-"))),
+            ("EXIT CODE:", describe_exit_code(meta["exit_code"]) if isinstance(meta.get("exit_code"), int) else "-"),
             ("RUNTIME:", f"{float(meta.get('duration_seconds', 0.0)):.1f}s"),
         ]
         right_meta = [
@@ -1829,6 +1834,10 @@ class StressTesterApp(ctk.CTk):
         self.default_gpu_resolution = "1280x720"
         self.ram_gb_var = ctk.StringVar(value=self.default_ram_gb)
         self.gpu_res_var = ctk.StringVar(value=self.default_gpu_resolution)
+        self.detected_vram_gb = detect_vram_gb()
+        self.vram_size_options = [str(size) for size in FURMARK_VRAM_TEST_SIZES_GB]
+        self.default_vram_gb = str(recommended_vram_test_gb(self.detected_vram_gb))
+        self.vram_gb_var = ctk.StringVar(value=self.default_vram_gb)
 
         drive_options = [p.device for p in psutil.disk_partitions(all=False) if p.fstype]
         default_drive = drive_options[0] if drive_options else "C:\\"
@@ -1931,12 +1940,14 @@ class StressTesterApp(ctk.CTk):
 
         phase_section, phase_body = build_section(shell, "Select Test Phases:")
         phase_section.grid(row=1, column=0, sticky="ew", padx=12, pady=(8, 8))
-        for column in range(6):
+        # Two staggered rows (4 + 3 cards): each card spans two of eight columns.
+        for column in range(8):
             phase_body.grid_columnconfigure(column, weight=1, uniform="phasecards")
 
         test_cards = [
             ("cpu", "CPU", []),
             ("gpu", "GPU", [{"label": "Res", "kind": "entry", "variable": self.gpu_res_var, "width": 90}]),
+            ("vram", "VRAM", [{"label": "Size (GB)", "kind": "menu", "variable": self.vram_gb_var, "values": self.vram_size_options, "width": 70}]),
             ("ram", "RAM", [{"label": "Cap (GB)", "kind": "entry", "variable": self.ram_gb_var, "width": 76}]),
             ("storage_read", "Storage (R)", [{"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 88}]),
             ("storage_write", "Storage (W)", [{"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 88}]),
@@ -1949,7 +1960,8 @@ class StressTesterApp(ctk.CTk):
             self.test_vars[key] = enabled
             self.duration_vars[key] = duration
             card = TestPhaseCard(phase_body, title, enabled, duration, extras)
-            card.grid(row=0, column=index, sticky="nsew", padx=10, pady=8)
+            row, position = divmod(index, 4)
+            card.grid(row=row, column=position * 2 + row, columnspan=2, pady=8)
             self.phase_cards[key] = card
 
         preset_section, preset_body = build_section(shell, "Preset manager:")
@@ -2651,6 +2663,11 @@ class StressTesterApp(ctk.CTk):
             f"Test marked FAILED (System Crash): {failed_test}\n"
             f"Run: {run_id}"
         )
+        windows_events = crash_state.get("windows_events") or []
+        if windows_events:
+            shown = "\n".join(f"- {line}" for line in windows_events[:5])
+            more = f"\n(and {len(windows_events) - 5} more in the run summary)" if len(windows_events) > 5 else ""
+            message += f"\n\nWindows recorded since the run started:\n{shown}{more}"
         if crash_state.get("summary_path"):
             message += f"\n\nReconstructed run summary:\n{crash_state['summary_path']}"
         self._show_warning("Crash Recovery", message)
@@ -2713,6 +2730,7 @@ class StressTesterApp(ctk.CTk):
             var.set(self.default_phase_duration_minutes)
         self.ram_gb_var.set(self.default_ram_gb)
         self.gpu_res_var.set(self.default_gpu_resolution)
+        self.vram_gb_var.set(self.default_vram_gb)
         target_drive = self.default_target_drive if self.default_target_drive in self.drive_options else self.drive_options[0]
         self.target_drive_var.set(target_drive)
         self.preset_var.set("Custom")
@@ -2744,6 +2762,8 @@ class StressTesterApp(ctk.CTk):
             self.logo_var.set(str(payload["logo_path"]))
         if "gpu_resolution" in payload:
             self.gpu_res_var.set(str(payload["gpu_resolution"]))
+        if str(payload.get("vram_gb", "")) in self.vram_size_options:
+            self.vram_gb_var.set(str(payload["vram_gb"]))
         if "generate_report" in payload:
             self.generate_report_var.set(bool(payload["generate_report"]))
         if "include_customer_name" in payload:
@@ -2784,6 +2804,7 @@ class StressTesterApp(ctk.CTk):
             "ram_gb": ram_gb,
             "target_drive": self.target_drive_var.get(),
             "gpu_resolution": gpu_resolution,
+            "vram_gb": int(self.vram_gb_var.get()),
             "generate_report": generate_report,
         }
 
@@ -2791,9 +2812,10 @@ class StressTesterApp(ctk.CTk):
         flagged_patterns: list[tuple[str, int]] = []
         pattern_labels = {
             "gpu": "GPU Stress",
+            "vram": "GPU Memory (VRAM) Stress",
             "psu": "PSU / System Stress",
         }
-        for key in ("gpu", "psu"):
+        for key in ("gpu", "vram", "psu"):
             duration = int(selections.get(key, 0) or 0)
             if duration > 5:
                 flagged_patterns.append((pattern_labels[key], duration))
@@ -2828,7 +2850,7 @@ class StressTesterApp(ctk.CTk):
             return None
         return value if value > 0 else None
 
-    def _validate_start_inputs(self, payload: dict[str, Any]) -> tuple[dict[str, int], float] | None:
+    def _validate_start_inputs(self, payload: dict[str, Any]) -> tuple[dict[str, int], float, int] | None:
         catalog = self.orchestrator._test_catalog()
         selections: dict[str, int] = {}
         invalid_durations: list[str] = []
@@ -2873,18 +2895,35 @@ class StressTesterApp(ctk.CTk):
                 )
                 return None
 
-        if (selections.get("gpu", 0) > 0 or selections.get("psu", 0) > 0) and self.orchestrator.parse_resolution(payload["gpu_resolution"]) is None:
+        uses_furmark = any(selections.get(key, 0) > 0 for key in ("gpu", "vram", "psu"))
+        if uses_furmark and self.orchestrator.parse_resolution(payload["gpu_resolution"]) is None:
             self._show_error("Validation Error", "GPU resolution must look like 1280x720.")
             return None
 
-        return selections, ram_gb
+        vram_gb = payload["vram_gb"] if selections.get("vram", 0) > 0 else 0
+        if vram_gb and self.detected_vram_gb and vram_gb > self.detected_vram_gb - VRAM_HEADROOM_GB:
+            if not self._ask_yes_no(
+                "VRAM Test Size",
+                (
+                    f"The VRAM test is set to {vram_gb} GB, but this graphics card reports about "
+                    f"{self.detected_vram_gb:.1f} GB of video memory.\n\n"
+                    "Data that does not fit is moved to system RAM, so part of the test then exercises "
+                    "system RAM and the PCIe link instead of the video memory. "
+                    f"Recommended size for this card: {recommended_vram_test_gb(self.detected_vram_gb)} GB."
+                ),
+                confirm_label="Use Anyway",
+                cancel_label="Cancel",
+            ):
+                return None
+
+        return selections, ram_gb, vram_gb
 
     def _confirm_thermal_protection(self, selections: dict[str, int]) -> bool:
         mappings = self.settings.get("telemetry_mappings", {}) or {}
         unprotected: list[str] = []
         if not mappings.get("cpu_temp"):
             unprotected.append("CPU Temperature")
-        if (selections.get("gpu", 0) > 0 or selections.get("psu", 0) > 0) and not mappings.get("gpu_temp"):
+        if any(selections.get(key, 0) > 0 for key in ("gpu", "vram", "psu")) and not mappings.get("gpu_temp"):
             unprotected.append("GPU Temperature")
         if not unprotected:
             return True
@@ -2921,7 +2960,7 @@ class StressTesterApp(ctk.CTk):
         validated = self._validate_start_inputs(payload)
         if validated is None:
             return
-        selections, ram_gb = validated
+        selections, ram_gb, vram_gb = validated
 
         if not self._confirm_thermal_protection(selections):
             return
@@ -2937,6 +2976,7 @@ class StressTesterApp(ctk.CTk):
                 target_drive=payload["target_drive"],
                 gpu_resolution=payload["gpu_resolution"],
                 generate_report=payload["generate_report"],
+                vram_gb=vram_gb,
             )
         except Exception as exc:
             self._show_error("Unable to start", str(exc))
@@ -3019,10 +3059,17 @@ class StressTesterApp(ctk.CTk):
 
     def _update_phase(self, event: dict[str, Any]) -> None:
         self.phase_label.configure(text=f"Phase {event['phase_index']}/{event['total_phases']}: {event['label']}")
-        self.phase_status_label.configure(text="")
-        remaining = int(event["remaining_seconds"])
-        mins, secs = divmod(max(0, remaining), 60)
-        self.countdown_label.configure(text=f"{mins:02d}:{secs:02d}")
+        if event.get("finishing"):
+            # Phase duration is over; engines get a short grace period to exit on their own.
+            self.countdown_label.configure(text="FINISHING")
+            self.phase_status_label.configure(
+                text=f"Duration reached - waiting for engines to finish ({int(event.get('finishing_remaining_seconds', 0))}s max)"
+            )
+        else:
+            self.phase_status_label.configure(text="")
+            remaining = int(event["remaining_seconds"])
+            mins, secs = divmod(max(0, remaining), 60)
+            self.countdown_label.configure(text=f"{mins:02d}:{secs:02d}")
         
         total_remaining = int(event.get("total_remaining_seconds", 0))
         t_mins, t_secs = divmod(max(0, total_remaining), 60)

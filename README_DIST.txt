@@ -5,7 +5,7 @@ Overview
 RWS Stress Tester is a Windows desktop application for orchestrating hardware stress tests.
 It is a control-and-monitoring wrapper around bundled third-party engines:
 - y-cruncher for CPU and RAM stress
-- FurMark for GPU stress
+- FurMark for GPU and video memory (VRAM) stress
 - DiskSpd for storage stress
 - LibreHardwareMonitor for live telemetry
 
@@ -70,6 +70,7 @@ Top controls:
 Select Test Phases area:
 - CPU
 - GPU
+- VRAM
 - RAM
 - Storage (R)
 - Storage (W)
@@ -78,16 +79,48 @@ Select Test Phases area:
 Each enabled phase has a duration field in minutes.
 
 Additional phase-specific inputs:
-- GPU: Res
+- GPU: Res (also used by the VRAM and PSU phases)
+- VRAM: Size (GB)
 - RAM: Cap (GB)
 - Storage read/write: Drive selector
 
 Phase behavior:
-- CPU runs a y-cruncher CPU stress profile with fixed 2 GB engine memory usage.
-- RAM runs a y-cruncher high-memory profile using the editable RAM amount.
-- GPU runs FurMark at the selected resolution.
-- Storage read/write runs DiskSpd against the selected drive.
-- PSU runs y-cruncher and FurMark together for combined system load.
+- CPU runs y-cruncher tests BKT, SFTv4, SNT, SVT, N63 and VT3 with fixed 2 GB engine memory usage:
+  light high-boost work, maximum-heat in-cache work and larger working sets, with load changes
+  between them. Targets core voltage, boost and Curve Optimizer / undervolt instability.
+- RAM runs y-cruncher tests FFTv4, N63 and VT3 using the editable RAM amount. Targets RAM,
+  memory controller and fabric instability (XMP/EXPO, timings, SoC voltage).
+- Each y-cruncher test needs a minimum slice of time to be useful (CPU and PSU 60 s, RAM 120 s).
+  Short phases keep only the most valuable tests that fit, ranked:
+    CPU: SFTv4, BKT, VT3, SNT, SVT, N63   (1 min = SFTv4 only, 6 min or more = all six)
+    RAM: FFTv4, VT3, N63                  (under 4 min = FFTv4 only, 6 min or more = all three)
+    PSU: SFTv4, SNT, SVT
+  The phase is split evenly across the selected tests (at most 5 minutes per test, then they repeat).
+- GPU runs FurMark at the selected resolution with its artifact scanner enabled. Any rendering
+  artifact fails the phase. FurMark's own log is saved with the run.
+- VRAM runs the same FurMark load while filling the selected amount of video memory with data that
+  is read back every frame (FurMark's VRAM test, OpenGL), with the artifact scanner enabled.
+  Faulty or overheating video memory shows up as artifacts or a driver crash/reset, either of
+  which fails the phase. Size (GB) is prefilled with the largest size that leaves at least 1 GB of
+  the detected video memory free; the app asks for confirmation if a larger size is chosen, because
+  data that does not fit spills into system RAM. On integrated graphics there is no separate video
+  memory: the phase then mostly tests system RAM shared with the GPU.
+- Storage read/write runs DiskSpd against the selected drive: 64 KB random I/O, 4 threads x 32
+  outstanding I/Os, on a test file of up to 8 GB (at most 20% of free space). Writes use random,
+  incompressible data. An I/O error, or any single I/O taking 10 seconds or longer, fails the phase.
+  The test file is deleted afterwards.
+- PSU runs y-cruncher's maximum-power in-cache tests (SFTv4, SNT, SVT) together with FurMark
+  (artifact scanner enabled) for maximum combined power draw.
+- During every phase, the app also watches the Windows System event log. Any of the following
+  logged while a phase runs fails that phase, even if the engine itself reported nothing:
+    - WHEA hardware errors, including errors the hardware corrected on its own (CPU cache/core,
+      memory, PCIe). These are often the first sign of an unstable overclock, undervolt or XMP/EXPO.
+    - Display driver stopped responding and was reset (TDR, event 4101), NVIDIA/AMD driver errors.
+    - Disk, NVMe and SATA controller errors, resets and I/O retries; file system errors.
+  The event is shown in the console, written to the phase log and listed in the certificate.
+  If the event log cannot be read, the run continues and the log says so.
+- When a phase's time is up, the timer shows FINISHING while the engines get a short grace period
+  to exit on their own (y-cruncher 10 s, FurMark 30 s, DiskSpd up to 120 s) before being stopped.
 
 RAM field behavior:
 - The RAM value is prefilled from currently available memory.
@@ -112,8 +145,10 @@ Start control:
 - START
 
 Extra launch behavior:
-- FurMark-based GPU and PSU runs above 5 minutes trigger a warning prompt before launch.
-- If the previous run ended in a system crash, the app shows a crash-recovery warning on startup.
+- FurMark-based GPU, VRAM and PSU runs above 5 minutes trigger a warning prompt before launch.
+- If the previous run ended in a system crash, the app shows a crash-recovery warning on startup,
+  including what Windows logged since that run started (blue screen code, unexpected power loss,
+  WHEA hardware errors). These are also added to the reconstructed run summary.
 
 Assign Sensors Window
 The Assign Sensors window is opened from the setup screen.
@@ -190,7 +225,7 @@ Completed Test Logs area:
 - Log viewer actions:
   - Copy Log
   - Open Log Folder
-  - Open Native Log for y-cruncher phases when a native engine log exists
+  - Open Native Log when the engine wrote its own log (y-cruncher, FurMark)
 
 Dashboard actions:
 - Abort Session
@@ -212,14 +247,18 @@ Files written by the app:
 - results\<run_id>\logs\cpu_stdout.log
 - results\<run_id>\logs\ram_stdout.log
 - results\<run_id>\logs\gpu_stdout.log
+- results\<run_id>\logs\vram_stdout.log
 - results\<run_id>\logs\storage_read_stdout.log
 - results\<run_id>\logs\storage_write_stdout.log
 - results\<run_id>\logs\psu_stdout.log
 
-Additional y-cruncher native logs, when those phases run:
+Additional native engine logs, when those phases run:
 - results\<run_id>\logs\cpu_ycruncher.log
 - results\<run_id>\logs\ram_ycruncher.log
 - results\<run_id>\logs\psu_ycruncher.log
+- results\<run_id>\logs\gpu_furmark.log
+- results\<run_id>\logs\vram_furmark.log
+- results\<run_id>\logs\psu_furmark.log
 
 PDF report location:
 - reports\*.pdf

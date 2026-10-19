@@ -1,0 +1,48 @@
+# Only the app source, the bundled engines and the files build.bat packages are tracked.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build output (build.bat / PyInstaller regenerate the .spec file)
+build/
+dist/
+*.spec
+_ctk_find.py
+_ctk_path.txt
+
+# Runtime output
+results/
+reports/
+test_state.json
+*.tmp
+
+# Engine runtime files written next to the engines
+Engines/FurMark/_furmark_log*.txt
+Engines/FurMark/_geexlab_log*.txt
+Engines/FurMark/_scores.csv
+Engines/FurMark/exports/*
+!Engines/FurMark/exports/_readme.txt
+Engines/FurMark/gpushark/exports/*
+!Engines/FurMark/gpushark/exports/_readme.txt
+
+# Logos are added per installation; keep only the folder readme
+Logotypes/*
+!Logotypes/README.txt
+
+# Development and troubleshooting files, not needed to build
+agents.md
+start.bat
+diag_*.bat
+diag_*.ps1
+furmark_diag*
+ycruncher_diag*
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
