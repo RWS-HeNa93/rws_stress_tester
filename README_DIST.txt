@@ -1,337 +1,209 @@
-RWS Stress Tester
-Packaged Application Guide
+RWS Stress Tester - Operator Guide
+==================================
 
-Overview
-RWS Stress Tester is a Windows desktop application for orchestrating hardware stress tests.
-It is a control-and-monitoring wrapper around bundled third-party engines:
-- y-cruncher for CPU and RAM stress
-- FurMark for GPU and video memory (VRAM) stress
-- DiskSpd for storage stress
-- LibreHardwareMonitor for live telemetry
+RWS Stress Tester runs hardware stress tests on a Windows PC, watches temperatures and errors
+while they run, and produces a PDF System Stability Certificate. It controls these bundled tools:
+- y-cruncher        CPU, RAM and PSU load (checks its own results)
+- FurMark           GPU and video memory (VRAM) load, with an artifact scanner
+- DiskSpd           storage load
+- LibreHardwareMonitor   temperature, load and power readings
 
-The app launches the engines, captures their stdout and stderr, watches live telemetry, applies
-thermal abort rules, preserves per-phase logs, and can generate a PDF System Stability Certificate.
+If every selected test passes, the verdict is CERTIFIED STABLE, whatever the test durations.
+Choosing sensible durations is up to the technician.
 
-Keep This Folder Intact
-Do not separate the executable from the folders and files shipped with it.
 
-Downloaded ZIP / Archive Warning
-If this software was downloaded from the internet as a ZIP or other archive, Windows may mark the archive as blocked.
-If you extract it without removing that block first, Windows can propagate that security flag to the unpacked files, which may cause issues with the app, bundled engines, or supporting DLLs.
+QUICK START
+-----------
+1. If you received this as a ZIP download: right-click the ZIP > Properties > tick Unblock >
+   OK, then extract it. (Otherwise Windows may block the bundled engines.)
+2. Keep the whole folder together. RWS_StressTester.exe needs the Engines\ folder next to it.
+3. Right-click RWS_StressTester.exe > Run as administrator.
+4. First time on a machine: click Assign Sensors and assign at least CPU Temperature and
+   GPU Temperature. Without them the thermal kill switch cannot protect the hardware.
+5. Tick the tests to run, set minutes for each, and press START.
+6. When the run ends, read the verdict, open any failed phase's log, and collect the PDF
+   from the reports\ folder.
 
-Recommended procedure before unpacking:
-1. Right-click the downloaded archive.
-2. Open Properties.
-3. If an Unblock checkbox or button is shown, enable Unblock.
-4. Click Apply.
-5. Click OK.
-6. Only then extract the archive.
 
-Required package contents:
-- RWS_StressTester.exe
-- Engines\
-- Logotypes\
-- settings.json
-- presets.json
-- README.txt
+THE TESTS
+---------
+Phases always run in this order: CPU, RAM, GPU, VRAM, Storage (R), Storage (W), PSU.
+Each card has Time (min) plus the fields below.
 
-Runtime folders created and used by the app:
-- results\
-- reports\
+CPU
+  y-cruncher with 2 GB of memory. Tests, most valuable first:
+  SFTv4, BKT, VT3, SNT, SVT, N63. Covers peak boost clocks, maximum heat and power, larger
+  working sets, and the load changes between tests. Finds unstable core voltage, boost and
+  Curve Optimizer / undervolt settings.
 
-Important:
-- Do not copy only RWS_StressTester.exe.
-- Keep the entire RWS_StressTester folder together.
-- Run the application as Administrator for reliable telemetry access.
+RAM  - Cap (GB): how much memory to test
+  y-cruncher tests FFTv4, VT3, N63 using the chosen amount. Finds unstable RAM, memory
+  controller and fabric settings (XMP/EXPO, timings, SoC voltage).
+  The field is prefilled from currently available memory. START is blocked if the value is
+  not a number, is zero, or is more than the system can spare.
 
-Packaged Folder Layout
-dist\RWS_StressTester\
-  RWS_StressTester.exe
-  README.txt
-  settings.json
-  presets.json
-  Engines\
-  Logotypes\
-  results\
-  reports\
+GPU  - Res: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
+  FurMark at full load with its artifact scanner, which checks every frame for corruption.
 
-About The Engine Readme Files
-Several .txt files inside Engines\ are vendor manuals shipped with the underlying test tools.
-They document the original engine binaries and are not the main operator guide for this app.
-Use this README.txt for the RWS app workflow and UI.
+VRAM - Size (GB): how much video memory to fill
+  The same FurMark load while filling the chosen amount of video memory with data that is
+  read back every frame. Faulty or overheating video memory shows up as artifacts or as a
+  driver crash or reset.
+  Size is prefilled with the largest size that leaves at least 1 GB of the card's memory free.
+  Choosing more asks for confirmation: data that does not fit spills into system RAM, which
+  then gets tested instead. Integrated graphics have no separate video memory, so on those
+  this phase mostly tests the system RAM shared with the GPU.
 
-Screen 1 - Setup
-When the application opens, you start on the setup screen.
-
-Top controls:
-- Thermal Settings
-- Assign Sensors
-
-Select Test Phases area:
-- CPU
-- GPU
-- VRAM
-- RAM
-- Storage (R)
-- Storage (W)
-- PSU
-
-Each enabled phase has a duration field in minutes.
-
-Additional phase-specific inputs:
-- GPU: Res (also used by the VRAM and PSU phases)
-- VRAM: Size (GB)
-- RAM: Cap (GB)
-- Storage read/write: Drive selector
-
-Phase behavior:
-- CPU runs y-cruncher tests BKT, SFTv4, SNT, SVT, N63 and VT3 with fixed 2 GB engine memory usage:
-  light high-boost work, maximum-heat in-cache work and larger working sets, with load changes
-  between them. Targets core voltage, boost and Curve Optimizer / undervolt instability.
-- RAM runs y-cruncher tests FFTv4, N63 and VT3 using the editable RAM amount. Targets RAM,
-  memory controller and fabric instability (XMP/EXPO, timings, SoC voltage).
-- Each y-cruncher test needs a minimum slice of time to be useful (CPU and PSU 60 s, RAM 120 s).
-  Short phases keep only the most valuable tests that fit, ranked:
-    CPU: SFTv4, BKT, VT3, SNT, SVT, N63   (1 min = SFTv4 only, 6 min or more = all six)
-    RAM: FFTv4, VT3, N63                  (under 4 min = FFTv4 only, 6 min or more = all three)
-    PSU: SFTv4, SNT, SVT
-  The phase is split evenly across the selected tests (at most 5 minutes per test, then they repeat).
-- GPU runs FurMark at the selected resolution with its artifact scanner enabled. Any rendering
-  artifact fails the phase. FurMark's own log is saved with the run.
-- VRAM runs the same FurMark load while filling the selected amount of video memory with data that
-  is read back every frame (FurMark's VRAM test, OpenGL), with the artifact scanner enabled.
-  Faulty or overheating video memory shows up as artifacts or a driver crash/reset, either of
-  which fails the phase. Size (GB) is prefilled with the largest size that leaves at least 1 GB of
-  the detected video memory free; the app asks for confirmation if a larger size is chosen, because
-  data that does not fit spills into system RAM. On integrated graphics there is no separate video
-  memory: the phase then mostly tests system RAM shared with the GPU.
-- Storage read/write runs DiskSpd against the selected drive: 64 KB random I/O, 4 threads x 32
-  outstanding I/Os, on a test file of up to 8 GB (at most 20% of free space). Writes use random,
-  incompressible data. An I/O error, or any single I/O taking 10 seconds or longer, fails the phase.
+Storage (R) / Storage (W) - Drive: the drive to test
+  DiskSpd random 64 KB reads or writes, 4 threads x 32 outstanding I/Os, on a test file of up
+  to 8 GB (at most 20% of the free space). Writes use random data that cannot be compressed.
   The test file is deleted afterwards.
-- PSU runs y-cruncher's maximum-power in-cache tests (SFTv4, SNT, SVT) together with FurMark
-  (artifact scanner enabled) for maximum combined power draw.
-- During every phase, the app also watches the Windows System event log. Any of the following
-  logged while a phase runs fails that phase, even if the engine itself reported nothing:
-    - WHEA hardware errors, including errors the hardware corrected on its own (CPU cache/core,
-      memory, PCIe). These are often the first sign of an unstable overclock, undervolt or XMP/EXPO.
-    - Display driver stopped responding and was reset (TDR, event 4101), NVIDIA/AMD driver errors.
-    - Disk, NVMe and SATA controller errors, resets and I/O retries; file system errors.
-  The event is shown in the console, written to the phase log and listed in the certificate.
-  If the event log cannot be read, the run continues and the log says so.
-- When a phase's time is up, the timer shows FINISHING while the engines get a short grace period
-  to exit on their own (y-cruncher 10 s, FurMark 30 s, DiskSpd up to 120 s) before being stopped.
 
-RAM field behavior:
-- The RAM value is prefilled from currently available memory.
-- You may edit it manually.
-- The app blocks start if the RAM value is non-numeric, zero, or too large for the current system.
+PSU
+  y-cruncher's maximum-power tests (SFTv4, SNT, SVT) and FurMark at the same time, for the
+  highest combined power draw.
 
-Preset manager:
-- Preset dropdown
-- Save As
-- Delete
-- Load Current
-- Reset
+Short tests run fewer y-cruncher tests
+  Each y-cruncher test needs a minimum time to be useful: CPU and PSU 1 minute, RAM 2 minutes.
+  Short phases keep only the most valuable tests that fit:
+    CPU: 1 min = SFTv4 only, 6 min or more = all six
+    RAM: under 4 min = FFTv4 only, 6 min or more = all three
+  The time is shared evenly between the chosen tests (at most 5 minutes each, then they repeat).
 
-Stability Certificate area:
-- Generate certificate at the completion of the tests
-- Logo path field
-- Browse button
-- Customer Name checkbox and input
-- Machine Name checkbox and input
+End of a phase
+  When the time is up, the timer shows FINISHING while the engines get a short grace period to
+  exit on their own (y-cruncher 10 s, FurMark 30 s, DiskSpd up to 120 s) before being stopped.
 
-Start control:
-- START
+Warnings before START
+  - GPU, VRAM or PSU longer than 5 minutes: FurMark is extremely heavy; confirm to continue.
+  - CPU or GPU temperature sensor not assigned: the thermal kill switch cannot protect it.
 
-Extra launch behavior:
-- FurMark-based GPU, VRAM and PSU runs above 5 minutes trigger a warning prompt before launch.
-- If the previous run ended in a system crash, the app shows a crash-recovery warning on startup,
-  including what Windows logged since that run started (blue screen code, unexpected power loss,
-  WHEA hardware errors). These are also added to the reconstructed run summary.
 
-Assign Sensors Window
-The Assign Sensors window is opened from the setup screen.
+WHAT FAILS A PHASE
+------------------
+A phase fails on any of the following. The reason is shown in the console, written to the
+phase log and listed on the certificate.
 
-It is used to bind detected LibreHardwareMonitor sensors to the app's fixed telemetry channels:
-- CPU Temperature
-- GPU Temperature
-- CPU Load
-- GPU Load
-- RAM Load
-- Storage Load
-- CPU Power
-- GPU Power
+  What happened                                Where to look
+  -------------------------------------------  ------------------------------------------------
+  y-cruncher reports a wrong result            CPU (cpu/psu phase) or RAM/memory controller
+                                               (ram phase): overclock, undervolt, XMP/EXPO,
+                                               voltages, cooling
+  FurMark artifact found                       GPU core (gpu/psu) or video memory (vram):
+                                               overclock, cooling, failing card
+  WHEA hardware error in the event log         CPU, RAM or PCIe instability, even if corrected
+                                               by the hardware. Often the first sign of an
+                                               unstable overclock, undervolt or XMP/EXPO
+  Display driver reset (TDR) or NVIDIA/AMD     GPU instability, power delivery, driver
+  driver error
+  Disk / NVMe / SATA error, reset or retry,    Drive, cable, controller or failing media
+  or a single I/O taking 10 s or longer
+  File system error                            Drive or storage controller
+  An engine crashes or quits early             The message gives the exit code in plain words;
+                                               crashes under load usually mean instability
+  Temperature above the thermal limit          Cooling. The run stops (THERMAL_ABORT)
+  The PC restarts or loses power               Shown on the next launch as FAILED (System
+                                               Crash), see below
 
-Available actions:
-- Refresh Sensors
-- Install PawnIO Driver, when an installer is bundled and the driver is needed
+Event log monitoring
+  During every phase the app checks the Windows System event log every 30 seconds and at the
+  end of the phase. Each event is reported once. If a machine logs the same error constantly,
+  the first 10 per phase are listed with a count of the rest; see Event Viewer > Windows Logs >
+  System for all of them. If the event log cannot be read, the run continues and the log says
+  so, and the certificate does not claim the event log was monitored.
 
-Telemetry notes:
-- Run the app as Administrator.
-- Sensor assignments are saved in settings.json.
-- The app warns when mappings are missing, invalid, or returning no live data.
+After a crash or power loss
+  On the next launch the app marks the interrupted phase FAILED (System Crash) and shows what
+  Windows recorded since the run started: blue screen code, unexpected power loss, WHEA errors.
+  A reconstructed run_summary.json is saved in that run's folder.
 
-Thermal Settings Window
-The Thermal Settings window is opened from the setup screen.
 
-It lets you edit the active abort thresholds for:
-- CPU
-- GPU
+SCREENS AND WINDOWS
+-------------------
+Setup screen
+  - Thermal Settings and Assign Sensors buttons (see below).
+  - Test cards: tick a card to include that phase.
+  - Preset manager: save the current setup under a name (Save As), Delete, re-apply the
+    selected preset (Load Current), or Reset to defaults. Presets are saved in presets.json.
+  - Stability Certificate: generate a certificate when the tests end, logo (from Logotypes\),
+    optional customer name and machine name.
+  - START.
 
-The limits can only be lowered: the built-in safety ceilings (CPU 105 C, GPU 95 C) cannot be exceeded.
+Assign Sensors
+  Links the hardware sensors found on this PC to the app's readings: CPU and GPU temperature,
+  CPU and GPU load, RAM load, storage load, CPU and GPU power. Saved in settings.json.
+  - Refresh Sensors re-scans the hardware.
+  - Install PawnIO Driver appears when CPU temperature needs the PawnIO driver.
+  - The app warns when assignments are missing, invalid or return no live data.
 
-If a running phase exceeds the configured thermal limit, the app stops the active engine processes and
-records a thermal abort. If the CPU or GPU temperature sensor is not assigned, the app warns before
-starting because the thermal kill switch cannot protect that component.
+Thermal Settings
+  The CPU and GPU temperatures at which a running test is stopped. They can only be lowered:
+  the built-in ceilings (CPU 105 C, GPU 95 C) cannot be exceeded.
 
-Screen 2 - Diagnostics Dashboard
-The dashboard appears after you press START.
+Dashboard (after START)
+  - Current phase, error indicator, time left in the phase and in the whole run.
+  - Live telemetry: CPU/GPU temperature and load, RAM load, storage load, CPU/GPU/total power.
+  - Live console with the engines' output; problems are highlighted.
+  - Completed Test Logs: click a finished phase to see its status, exit code, run time,
+    start/finish times, command line and full log. Copy Log, Open Log Folder, and Open Native
+    Log for the engine's own log (y-cruncher, FurMark).
+  - Abort Session stops the run; no certificate is made. Refresh Review reloads the completed
+    logs. Back To Setup is available once the run has ended.
+  - At the end the verdict is shown: CERTIFIED STABLE or UNSTABLE.
 
-Header area:
-- Current phase label, for example Phase 2/4: RAM Stress
-- Error indicator when issues are detected
-- Phase Remaining timer
-- Matrix Remaining timer
 
-Live Telemetry area:
-- CPU Temperature
-- CPU Load
-- GPU Temperature
-- GPU Load
-- RAM Load
-- Storage Load
-- CPU Power
-- GPU Power
-- Total Power
+FILES
+-----
+Folder layout
+  RWS_StressTester.exe
+  README.txt          this guide
+  settings.json       logo, certificate details, sensor assignments, thermal limits
+  presets.json        saved presets
+  Engines\            the test tools - do not change or remove
+  Logotypes\          put certificate logos (.png, .jpg) here
+  results\            one folder per run (created by the app)
+  reports\            PDF certificates (created by the app)
 
-Live Engine Console:
-- Shows the live engine transcript while a phase is running
-- Includes stdout and stderr
-- Alerts are highlighted when engine output indicates a problem
+Each run: results\<run_id>\  (run_id is the start date and time, e.g. 20261019_181729)
+  run_summary.json            verdict, issues and per-phase results
+  telemetry_summary.json      maximum temperatures and loads, per phase
+  logs\engine_meta.json       per-phase status, exit code, times, command line, log paths
+  logs\<phase>_stdout.log     the main log of each phase (engine output, stderr marked
+                              [STDERR], app messages marked [APP])
+  logs\<phase>_ycruncher.log  y-cruncher's own log (cpu, ram, psu)
+  logs\<phase>_furmark.log    FurMark's own log (gpu, vram, psu)
+  <phase> is cpu, ram, gpu, vram, storage_read, storage_write or psu.
 
-Completed Test Logs area:
-- Finished phases remain available during the run and after the run ends
-- Each completed entry can be opened without leaving the app
-- The log viewer shows:
-  - engine
-  - status
-  - exit code
-  - runtime
-  - started time
-  - finished time
-  - full command line
-  - canonical app-captured transcript
-- Log viewer actions:
-  - Copy Log
-  - Open Log Folder
-  - Open Native Log when the engine wrote its own log (y-cruncher, FurMark)
+test_state.json appears in the main folder only while a test is running; the app uses it to
+detect a crash on the next launch.
 
-Dashboard actions:
-- Abort Session
-- Refresh Review
-- Back To Setup
 
-End-of-run behavior:
-- The verdict shown on the dashboard is either CERTIFIED STABLE or UNSTABLE.
-- Completed phase logs remain browsable after the run finishes.
-- The app shows the saved PDF path when report generation is enabled.
+TROUBLESHOOTING
+---------------
+The app or an engine does not start
+  - Check that Engines\ is next to RWS_StressTester.exe.
+  - If the package came as a ZIP, delete the folder, unblock the ZIP (Quick Start, step 1)
+    and extract it again.
+  - Anti-virus can flag apps built with PyInstaller; add an exclusion for this folder.
 
-Logging And Artifacts
-Each run creates a unique folder:
-results\<run_id>\
+Telemetry shows nothing or Unassigned
+  - Run as administrator.
+  - Open Assign Sensors and assign the readings. Assignments are per machine type.
+  - If CPU temperature sensors exist but read nothing, use Install PawnIO Driver.
 
-Files written by the app:
-- results\<run_id>\run_summary.json
-- results\<run_id>\logs\engine_meta.json
-- results\<run_id>\logs\cpu_stdout.log
-- results\<run_id>\logs\ram_stdout.log
-- results\<run_id>\logs\gpu_stdout.log
-- results\<run_id>\logs\vram_stdout.log
-- results\<run_id>\logs\storage_read_stdout.log
-- results\<run_id>\logs\storage_write_stdout.log
-- results\<run_id>\logs\psu_stdout.log
+"Windows event log check unavailable" in the log
+  - The run still works, but Windows-logged hardware errors are not checked. Run as
+    administrator; if it persists, check those errors manually in Event Viewer.
 
-Additional native engine logs, when those phases run:
-- results\<run_id>\logs\cpu_ycruncher.log
-- results\<run_id>\logs\ram_ycruncher.log
-- results\<run_id>\logs\psu_ycruncher.log
-- results\<run_id>\logs\gpu_furmark.log
-- results\<run_id>\logs\vram_furmark.log
-- results\<run_id>\logs\psu_furmark.log
+A phase failed
+  - Open it in Completed Test Logs; the [APP] lines at the end give the reason.
+  - Use the table in WHAT FAILS A PHASE to see where to look.
 
-PDF report location:
-- reports\*.pdf
+No PDF or no logo on it
+  - Check that "Generate certificate at the completion of the tests" is ticked.
+  - Re-select the logo with Browse if the file was moved.
+  - Aborted runs never produce a certificate.
 
-Notes:
-- The app-captured *_stdout.log files are the primary execution transcripts used by the UI.
-- stderr is preserved in the same app log with a [STDERR] prefix.
-- engine_meta.json stores per-phase metadata such as status, exit code, timestamps, command line, and log paths.
-- run_summary.json stores the final run verdict and the executed test summary.
-- test_state.json is used internally for crash recovery detection between launches.
-
-Certificate And Branding
-If report generation is enabled, the application can create a PDF System Stability Certificate.
-
-The certificate can include:
-- Selected logo image
-- Optional customer name
-- Optional machine name
-- Completion timestamp
-- Overall verdict
-- Test summary
-- Maximum observed telemetry
-- Recorded issues, when present
-
-Logo usage:
-- Put .png, .jpg, or .jpeg files into Logotypes\
-- Use Browse in the setup screen to select the logo
-- The selected path is stored in settings.json
-
-If the selected logo file no longer exists, the PDF is still generated without the image.
-
-Deploying To Another Machine
-Before extracting a downloaded archive on the target PC:
-1. Right-click the downloaded ZIP or archive.
-2. Open Properties.
-3. Enable Unblock if the option is shown.
-4. Click Apply and OK.
-5. Extract the archive only after that.
-
-If you skip this step, Windows may block extracted files and cause issues with the app.
-
-1. Copy the entire dist\RWS_StressTester\ folder to the target PC.
-2. Keep the folder structure unchanged.
-3. Add any certificate logos to Logotypes\ if needed.
-4. Right-click RWS_StressTester.exe and choose Run as administrator.
-
-Troubleshooting
-Application does not start:
-- Confirm RWS_StressTester.exe is still inside the full packaged folder.
-- Confirm Engines\ exists next to the executable.
-- If the app was downloaded as an archive, unblock the archive in Properties and extract it again.
-
-Telemetry is missing or shows Unassigned:
-- Run the app as Administrator.
-- Open Assign Sensors and bind the required telemetry channels.
-- If CPU temperature sensors exist but do not return live values, install the PawnIO driver if provided.
-
-Thermal abort occurred:
-- Review the live console and the saved phase log.
-- Check the configured limits in Thermal Settings.
-
-No PDF or missing logo:
-- Confirm Generate certificate at the completion of the tests is enabled.
-- Confirm the selected image still exists.
-- Re-select the logo with Browse if the saved path is outdated.
-
-Logs or reports are not appearing:
-- Confirm the app can write to the packaged folder location.
-- Avoid read-only folders or locked-down locations.
-
-Operational Notes
-- Manual abort stops the session and does not generate the final report.
-- Anti-virus software may flag PyInstaller-built executables; add an exclusion if required.
-- Do not modify or remove files inside Engines\ unless you intend to update the bundled test engines.
-
-End of README
+Logs or reports are not saved
+  - The folder must be writable. Do not run it from a read-only location such as a
+    write-protected USB stick or a protected system folder.

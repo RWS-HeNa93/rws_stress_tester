@@ -1,192 +1,146 @@
-# Hardware Stress Tester
+# RWS Stress Tester
 
-A Windows desktop application that orchestrates hardware stress testing for PC diagnostics. It wraps industry-standard compiled binaries (y-cruncher, FurMark, DiskSpd) and provides real-time telemetry monitoring via LibreHardwareMonitor, automated error detection, and branded PDF Stability Certificates.
+A Windows desktop app that runs hardware stress tests for PC diagnostics and produces a PDF System
+Stability Certificate. It controls bundled tools (y-cruncher, FurMark, DiskSpd), reads temperatures
+and power through LibreHardwareMonitor, stops the run if anything overheats, and fails a test on
+engine errors, rendering artifacts or hardware errors logged by Windows.
 
----
-
-## Table of Contents
-
-- [Requirements](#requirements)
-- [Running from Source](#running-from-source)
-- [Building a Standalone Executable](#building-a-standalone-executable)
-- [Compiled Folder Structure](#compiled-folder-structure)
-- [Deploying to Another Machine](#deploying-to-another-machine)
-- [Configuration Files](#configuration-files)
-- [Troubleshooting](#troubleshooting)
+This file is for building the app. **The operator guide is [`README_DIST.txt`](README_DIST.txt)**:
+it explains the tests, the screens and the results, and `build.bat` ships it next to the `.exe` as
+`README.txt`.
 
 ---
 
-## Requirements
+## Contents
 
-### For Running from Source
-- **Python 3.10+** (Windows)
-- Python packages listed in `requirements.txt`:
-  - `customtkinter` — UI framework
-  - `psutil` — system memory and process utilities
-  - `reportlab` — PDF certificate generation
-  - `pythonnet` — .NET interop for LibreHardwareMonitor DLL
-
-### For Running the Compiled Executable
-- **Windows 10/11 (64-bit)** — no Python installation needed
-- **Administrator privileges** — required for LibreHardwareMonitor kernel driver and hardware telemetry access
+- [Build it on a fresh PC](#build-it-on-a-fresh-pc)
+- [Build it with GitHub Actions](#build-it-with-github-actions)
+- [Run from source](#run-from-source)
+- [Deploy to a test machine](#deploy-to-a-test-machine)
+- [Project layout](#project-layout)
+- [Troubleshooting the build](#troubleshooting-the-build)
 
 ---
 
-## Running from Source
+## Build it on a fresh PC
 
-1. Create a virtual environment and install dependencies:
+You need Windows 10 or 11 (64-bit) and about 1 GB of free space.
+
+1. **Install Python 3.12 (64-bit)** from [python.org](https://www.python.org/downloads/windows/).
+   During setup, tick **Add python.exe to PATH**. Avoid newer versions for now: the hardware-sensor
+   library (pythonnet) may not support them yet. Use the python.org installer rather than the
+   Microsoft Store version.
+
+2. **Get the code**, either way:
+   - `git clone https://github.com/RWS-HeNa93/rws_stress_tester.git`
+   - or on GitHub: **Code → Download ZIP**. Before extracting, right-click the ZIP →
+     **Properties** → tick **Unblock** → **OK**. Otherwise Windows marks every extracted file as
+     downloaded and may block the bundled engines.
+
+3. **Open Command Prompt in the project folder** and run:
    ```batch
    python -m venv .venv
    .venv\Scripts\pip install -r requirements.txt
-   ```
-
-2. Launch the application (as Administrator):
-   ```batch
-   .venv\Scripts\python main.py
-   ```
-
----
-
-## Building a Standalone Executable
-
-The project includes a `build.bat` script that automates the entire compilation process using [PyInstaller](https://pyinstaller.org/).
-
-### Steps
-
-1. **Ensure you have a working `.venv`** with all dependencies installed (see above).
-
-2. **Run the build script**:
-   ```batch
    build.bat
    ```
+   `build.bat` installs PyInstaller into `.venv`, builds a single `.exe`, and assembles the package.
+   It waits for a key press at the end.
 
-3. The script will:
-   - Install/upgrade PyInstaller inside the virtual environment
-   - Locate the `customtkinter` package for theme bundling
-   - Run PyInstaller in `--onefile` mode with a UAC admin manifest
-   - Copy the `Engines` folder, config files, `Logotypes`, and the packaged README, and create output directories
-   - Produce the final distributable at `dist\RWS_StressTester\`
-
-4. **Launch the compiled app**:
-   ```batch
-   dist\RWS_StressTester\RWS_StressTester.exe
+4. **The result is `dist\RWS_StressTester\`.** That whole folder is the app:
+   ```
+   dist\RWS_StressTester\
+   ├── RWS_StressTester.exe   the app (asks for administrator rights when started)
+   ├── README.txt             operator guide (copied from README_DIST.txt)
+   ├── settings.json          empty defaults; filled in from the app
+   ├── presets.json           empty; presets are saved from the app
+   ├── Engines\               y-cruncher, FurMark, DiskSpd, LibreHardwareMonitor, PawnIO installer
+   ├── Logotypes\             certificate logos
+   ├── results\               per-run logs and summaries (written by the app)
+   └── reports\               PDF certificates (written by the app)
    ```
 
-> **Note:** The build uses `--windowed` mode so no console window appears. If you need to see console output for debugging, edit `build.bat` and change `--windowed` to `--console`.
->
-> `build.bat` regenerates `RWS_StressTester.spec` on every build, so `.spec` files are not kept in git.
-
-### Building with GitHub Actions
-
-Every push runs `.github/workflows/build-windows.yml` on a Windows runner: it installs the requirements,
-runs `build.bat` and uploads `dist\RWS_StressTester\` as a build artifact (kept for 30 days). Download it
-from the run's page under **Actions**. The workflow can also be started by hand with **Run workflow**.
+To see Python errors from the built app, change `--windowed` to `--console` in `build.bat` and
+rebuild.
 
 ---
 
-## Compiled Folder Structure
+## Build it with GitHub Actions
 
-After a successful build, the `dist\RWS_StressTester\` folder contains:
+Every push runs [`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml) on a
+Windows machine. It follows the same steps as above, checks that the package contains the `.exe`
+and the engines, and uploads `dist\RWS_StressTester\` as an artifact (kept for 30 days).
 
-```
-dist\RWS_StressTester\
-│
-├── RWS_StressTester.exe        ← Main application (self-contained, unpacks its
-│                                  Python runtime to %TEMP% at launch)
-├── README.txt                  ← Operator guide (from README_DIST.txt)
-├── settings.json               ← User settings (logo path, telemetry mappings, thermal limits)
-├── presets.json                ← Saved test presets
-├── Logotypes\                  ← Certificate logos
-│
-├── Engines\                    ← Stress-test engine binaries (REQUIRED)
-│   ├── DiskSpd\amd64\diskspd.exe
-│   ├── FurMark\furmark.exe
-│   ├── y-cruncher\y-cruncher.exe
-│   ├── LibreHardwareMonitor\LibreHardwareMonitorLib.dll
-│   └── PawnIO_Driver\PawnIO_setup.exe
-│
-├── results\                    ← Created at runtime — one folder per run
-│   └── <run_id>\
-│       ├── run_summary.json
-│       ├── telemetry_summary.json
-│       └── logs\
-│           ├── <test>_stdout.log
-│           ├── <test>_ycruncher.log
-│           └── engine_meta.json
-│
-└── reports\                    ← Created at runtime — generated PDF certificates
+To get it: **Actions** tab → the run → **Artifacts** at the bottom of the page. To build without
+pushing, open **Build Windows package** in the Actions tab and press **Run workflow**. Unblock the
+downloaded ZIP before extracting it.
+
+---
+
+## Run from source
+
+After steps 1–3 above (`build.bat` is not needed), open Command Prompt **as administrator**
+(right-click → *Run as administrator*), go to the project folder and run:
+
+```batch
+.venv\Scripts\python main.py
 ```
 
-### Key Points
-
-| Item | Purpose |
-|------|---------|
-| `RWS_StressTester.exe` | Main application — double-click to launch |
-| `Engines\` | All stress-test binaries. **Must be present alongside the .exe** |
-| `settings.json` | Persisted user configuration (logo, sensor mappings, thermal limits) |
-| `presets.json` | Saved diagnostic presets |
-| `results\` | Auto-created — stores per-run logs and summaries |
-| `reports\` | Auto-created — stores generated PDF certificates |
+Administrator rights are needed to read hardware sensors. The app uses `Engines\` and writes
+`settings.json`, `presets.json`, `results\` and `reports\` in the project folder; `results\` and
+`reports\` are ignored by git.
 
 ---
 
-## Deploying to Another Machine
+## Deploy to a test machine
 
-To run the application on a PC that **does not have Python installed**:
-
-1. **Copy the entire `dist\RWS_StressTester\` folder** to the target machine.
-   - You can put it anywhere (Desktop, USB drive, `C:\Tools\`, etc.)
-
-2. **Run as Administrator**: Right-click `RWS_StressTester.exe` → *Run as administrator* (the exe also requests elevation itself).
-   - Admin privileges are required for LibreHardwareMonitor to access hardware sensors.
-
-3. **Update `settings.json`** on the target machine:
-   - The `logo_path` field points to an image file on the build machine. Update it to a valid path on the target machine, or use the in-app file picker to select a new logo.
-   - The `telemetry_mappings` may need to be reconfigured via the in-app sensor picker if the target hardware differs.
-
-> **Important:** Do **not** copy only the `.exe` file. The entire `RWS_StressTester\` folder is required — the `.exe` depends on the `Engines\` folder and config files next to it.
+1. Copy the whole `dist\RWS_StressTester\` folder (or the extracted GitHub artifact) to the machine:
+   Desktop, USB drive, `C:\Tools\`, anywhere writable. Never copy the `.exe` alone.
+2. Run `RWS_StressTester.exe` as administrator. No Python is needed on the test machine.
+3. Assign sensors and choose a logo in the app. See `README.txt` in the folder.
 
 ---
 
-## Configuration Files
+## Project layout
 
-### `settings.json`
-Stores persistent user preferences:
-- `logo_path` — Path to the company logo for PDF certificates
-- `customer_name` — Customer name for the certificate
-- `certificate_machine_name` — Machine identifier
-- `telemetry_mappings` — Hardware sensor ID mappings
+| Path | What it is |
+|------|------------|
+| `main.py` | Entry point: starts the UI |
+| `ui.py` | CustomTkinter interface: setup screen, dashboard, dialogs, log viewer |
+| `orchestrator.py` | Runs the session: builds engine commands, runs phases, reads engine output, decides pass/fail, writes logs and summaries |
+| `telemetry.py` | Sensor readings through LibreHardwareMonitor (pythonnet); feeds the thermal kill switch |
+| `eventlog.py` | Watches the Windows System log for hardware errors, driver resets and storage errors during each phase |
+| `report_gen.py` | PDF certificate (reportlab) |
+| `Engines\` | Bundled third-party tools, shipped unchanged except y-cruncher's runtime DLLs (see below) |
+| `settings.json`, `presets.json` | Empty defaults copied into the package |
+| `README_DIST.txt` | Operator guide, shipped as `README.txt` |
+| `build.bat` | Builds the `.exe` and assembles `dist\RWS_StressTester\` |
+| `.github/workflows/build-windows.yml` | The same build on GitHub Actions |
 
-This file is auto-saved by the application. It can also be manually edited.
-
-### `presets.json`
-Stores saved test profiles (component selections and durations). Managed entirely through the UI.
-
-### `test_state.json`
-Auto-created at runtime to track the active test. Used for crash recovery detection on next launch. Automatically cleaned up after a successful run.
+Notes:
+- `Engines\y-cruncher\` contains 32-bit `msvcp140.dll` and `vcruntime140.dll` (14.44). The
+  y-cruncher launcher is 32-bit and crashes with `0xC0000005` on machines with an older Visual C++
+  runtime; these copies avoid that. Keep them when updating y-cruncher.
+- `.spec` files are generated by `build.bat` on every build and are not kept in git.
+- `requirements.txt` does not pin versions, so each build installs the newest packages.
 
 ---
 
-## Troubleshooting
+## Troubleshooting the build
 
-### Application won't start
-- Ensure you are running as **Administrator**.
-- Check that the `Engines\` folder is present next to the `.exe`.
+**`Virtual environment not found at .venv`**: run step 3's first two commands in the project folder
+first.
 
-### "LibreHardwareMonitor DLL not found" error
-- Verify that `Engines\LibreHardwareMonitor\LibreHardwareMonitorLib.dll` exists.
-- The DLL is staged to a temp directory on first use — ensure the user has write access to `%LOCALAPPDATA%` or `%TEMP%`.
+**`'python' is not recognized`**: Python is not on PATH. Reinstall it with **Add python.exe to
+PATH** ticked, or use `py -3.12 -m venv .venv` instead.
 
-### Telemetry shows no data
-- Hardware sensors require admin privileges to read.
-- The sensor mappings in `settings.json` are hardware-specific. Use the in-app sensor configuration to remap sensors on new hardware.
+**`pip install` fails on pythonnet**: the Python version is too new for pythonnet. Install Python
+3.12, delete `.venv`, and repeat step 3.
 
-### Anti-virus false positive
-- PyInstaller executables are occasionally flagged by anti-virus software. This is a known false positive. Add an exclusion for the `RWS_StressTester\` folder if needed.
+**`No module named tkinter` or the UI does not open**: use the python.org installer, which includes
+tkinter.
 
-### Build fails with "hidden import not found"
-- Ensure all packages in `requirements.txt` are installed in the `.venv`.
-- Run `.venv\Scripts\pip install -r requirements.txt` before building.
+**The built app is flagged by anti-virus**: PyInstaller apps are sometimes flagged by mistake. Add an
+exclusion for the `RWS_StressTester` folder.
 
-### Console output for debugging
-- Edit `build.bat` and change `--windowed` to `--console` to see stdout/stderr in a terminal window when running the compiled app.
+**Problems running tests** (sensors, engines, failed phases): see Troubleshooting in
+[`README_DIST.txt`](README_DIST.txt).
