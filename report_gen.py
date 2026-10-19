@@ -117,16 +117,6 @@ def build_stability_report(output_path: Path, settings: dict, summary: dict) -> 
         issues = "<br/>".join(_escape_lines(summary["issues"]))
         story.append(Paragraph(f"Observed issues:<br/>{issues}", styles["BodyText"]))
 
-    if summary.get("run_id"):
-        story.append(Spacer(1, 4 * mm))
-        story.append(
-            Paragraph(
-                f"Log traceability: full engine logs for run {_escape(str(summary['run_id']))} "
-                "are stored with the run artifacts in results/" + _escape(str(summary["run_id"])) + "/logs.",
-                styles["BodyText"],
-            )
-        )
-
     doc.build(story)
     return output_path
 
