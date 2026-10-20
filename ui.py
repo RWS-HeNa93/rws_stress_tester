@@ -124,20 +124,20 @@ def apply_theme(name: str) -> str:
 UNASSIGNED_SENSOR_OPTION = "Unassigned"
 SENSOR_READING_UNITS = {"Temperature": " °C", "Load": "%", "Power": " W", "Clock": " MHz"}
 # Live telemetry cards on the dashboard: device -> (title, ((reading, label, has a bar), ...)).
-# Clocks have no natural maximum, so they show the value only.
+# Clocks have no natural maximum, so they show the value only and come after the readings with bars.
 TELEMETRY_CARDS: dict[str, tuple[str, tuple[tuple[str, str, bool], ...]]] = {
     "cpu": ("CPU", (
         ("cpu_temp", "Temperature", True),
         ("cpu_load", "Load", True),
-        ("cpu_clock", "Clock", False),
         ("cpu_power", "Power", True),
+        ("cpu_clock", "Clock", False),
     )),
     "gpu": ("GPU", (
         ("gpu_temp", "Temperature", True),
         ("gpu_load", "Load", True),
+        ("gpu_power", "Power", True),
         ("gpu_clock", "Core clock", False),
         ("vram_clock", "Memory clock", False),
-        ("gpu_power", "Power", True),
     )),
     "ram": ("RAM", (("ram_load", "Total load", True),)),
     "storage": ("Storage", (("storage_load", "Activity", True),)),
