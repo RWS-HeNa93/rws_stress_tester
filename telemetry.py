@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -8,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Mapping
 
 
 CPU_TEMP_LIMIT_C = 105.0
@@ -56,6 +57,29 @@ TELEMETRY_CATEGORIES: tuple[TelemetryCategory, ...] = (
 )
 TELEMETRY_CATEGORY_MAP = {category.key: category for category in TELEMETRY_CATEGORIES}
 DEFAULT_TELEMETRY_MAPPINGS = {category.key: None for category in TELEMETRY_CATEGORIES}
+
+
+# LibreHardwareMonitor sensor names to pick automatically for each reading, best first.
+# Matching is exact and ignores case; a reading with no matching sensor stays unassigned.
+AUTO_ASSIGN_SENSOR_NAMES: dict[str, tuple[str, ...]] = {
+    "cpu_temp": (
+        "CPU Package", "Core (Tctl/Tdie)", "Core (Tdie)", "Core (Tctl)", "CCDs Max (Tdie)", "Core Max", "CPU Cores", "Core Average",
+    ),
+    "gpu_temp": ("GPU Core", "GPU Hot Spot"),
+    "cpu_load": ("CPU Total",),
+    "gpu_load": ("GPU Core", "GPU Render/Compute", "D3D 3D"),
+    "ram_load": ("Memory",),
+    "storage_load": ("Total Activity",),
+    "gpu_power": ("GPU Package", "GPU Power", "GPU PPT", "GPU Total", "GPU Core"),
+    "cpu_power": ("CPU Package", "Package", "CPU Cores"),
+}
+# Hardware never picked automatically: page-file usage is not RAM load.
+AUTO_ASSIGN_EXCLUDED_HARDWARE = ("virtual memory",)
+GPU_VENDOR_RANK = {"gpunvidia": 3, "gpuamd": 2, "gpuintel": 1}
+PLAUSIBLE_TEMPERATURE_C = (1.0, 150.0)
+
+PAWNIO_UNINSTALL_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
+PAWNIO_DEVICE_PATH = r"\\?\GLOBALROOT\Device\PawnIO"
 
 
 @dataclass
@@ -163,22 +187,25 @@ class TelemetryMonitor:
         return {"valid": valid, "invalid": invalid, "unassigned": unassigned}
 
     def get_pawnio_status(self) -> dict[str, Any]:
-        with self._telemetry_lock:
-            try:
-                self._load_hardware_module()
-                from LibreHardwareMonitor import PawnIo
-            except Exception as exc:
-                return {"is_installed": None, "version": "", "error": str(exc)}
+        return detect_pawnio_status()
 
-            try:
-                version = PawnIo.PawnIo.Version
-                return {
-                    "is_installed": bool(PawnIo.PawnIo.IsInstalled),
-                    "version": str(version) if version is not None else "",
-                    "error": "",
-                }
-            except Exception as exc:
-                return {"is_installed": None, "version": "", "error": str(exc)}
+    def reopen(self) -> None:
+        """Close the LibreHardwareMonitor session so the next read opens a fresh one.
+
+        Hardware objects load their PawnIO modules when the session opens, so a driver
+        installed after that stays unused until the session is rebuilt.
+        """
+        with self._telemetry_lock:
+            computer = self._computer
+            self._computer = None
+            self._last_sensor_inventory = {}
+            # Close under the lock: Computer.Open/Close share static mutexes, so a new
+            # session must not open while the old one is still closing.
+            if computer is not None:
+                try:
+                    computer.Close()
+                except Exception:
+                    pass
 
     def sample(self) -> TelemetrySample:
         with self._telemetry_lock:
@@ -404,3 +431,149 @@ class TelemetryMonitor:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+def detect_pawnio_status() -> dict[str, Any]:
+    """Check the PawnIO driver directly, fresh on every call.
+
+    LibreHardwareMonitor's PawnIo.IsInstalled is read once per process, so it keeps
+    reporting a driver installed while the app runs as missing.
+    "is_running" is whether the driver's device exists, i.e. sensors can use it now.
+    """
+    if os.name != "nt":
+        return {"is_installed": None, "is_running": None, "version": "", "error": "PawnIO is only available on Windows."}
+    try:
+        version = _read_pawnio_version()
+        is_running = _pawnio_device_present()
+    except Exception as exc:
+        return {"is_installed": None, "is_running": None, "version": "", "error": str(exc)}
+    return {"is_installed": bool(version) or is_running, "is_running": is_running, "version": version, "error": ""}
+
+
+def _read_pawnio_version() -> str:
+    import winreg
+
+    for access in (winreg.KEY_READ | winreg.KEY_WOW64_64KEY, winreg.KEY_READ):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, PAWNIO_UNINSTALL_KEY, 0, access) as key:
+                value, _value_type = winreg.QueryValueEx(key, "DisplayVersion")
+        except OSError:
+            continue
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _pawnio_device_present() -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    file_share_read_write = 0x1 | 0x2
+    open_existing = 3
+    error_access_denied = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    # Zero access only asks whether the device exists; reading sensors is left to LibreHardwareMonitor.
+    handle = create_file(PAWNIO_DEVICE_PATH, 0, file_share_read_write, None, open_existing, 0, None)
+    if handle not in (None, ctypes.c_void_p(-1).value):
+        kernel32.CloseHandle(handle)
+        return True
+    return ctypes.get_last_error() == error_access_denied
+
+
+def auto_assign_sensors(
+    sensors: Iterable[Mapping[str, Any]],
+    keep: Mapping[str, Any] | None = None,
+) -> dict[str, str | None]:
+    """Pick a sensor for each reading from a sensor inventory (dicts as the orchestrator lists them).
+
+    The device is chosen first: GPU readings prefer the GPU with the most dedicated memory,
+    so a discrete card beats integrated graphics even while one of its sensors reads nothing;
+    storage prefers the lowest-numbered drive, usually the system disk. On that device a sensor
+    reporting a live value wins over a better-named one that reads nothing.
+    Mappings in `keep` that still point to a compatible sensor with a live value are kept.
+    """
+    sensors = list(sensors)
+    sensors_by_id = {sensor.get("sensor_id"): sensor for sensor in sensors}
+    hardware_order: dict[str, int] = {}
+    gpu_memory_mb: dict[str, float] = {}
+    for sensor in sensors:
+        hardware_key = _hardware_key(sensor)
+        hardware_order.setdefault(hardware_key, len(hardware_order))
+        if sensor.get("hardware_role") == "gpu" and str(sensor.get("sensor_name", "")).lower() in {
+            "gpu memory total", "d3d dedicated memory total",
+        }:
+            gpu_memory_mb[hardware_key] = max(gpu_memory_mb.get(hardware_key, 0.0), sensor.get("value") or 0.0)
+
+    def hardware_preference(sensor: Mapping[str, Any]) -> tuple[float, ...]:
+        hardware_key = _hardware_key(sensor)
+        role = sensor.get("hardware_role")
+        if role == "gpu":
+            vendor = GPU_VENDOR_RANK.get(str(sensor.get("hardware_type", "")).lower(), 0)
+            return (gpu_memory_mb.get(hardware_key, 0.0), vendor, -hardware_order[hardware_key])
+        if role == "storage":
+            return (-_device_index(sensor), -hardware_order[hardware_key])
+        return (-hardware_order[hardware_key],)
+
+    mappings: dict[str, str | None] = DEFAULT_TELEMETRY_MAPPINGS.copy()
+    for category in TELEMETRY_CATEGORIES:
+        kept_id = (keep or {}).get(category.key)
+        kept = sensors_by_id.get(kept_id) if kept_id else None
+        if kept is not None and _sensor_fits(kept, category) and _has_live_value(kept, category):
+            mappings[category.key] = kept_id
+            continue
+
+        names = [name.lower() for name in AUTO_ASSIGN_SENSOR_NAMES.get(category.key, ())]
+        candidates = [
+            sensor
+            for sensor in sensors
+            if _sensor_fits(sensor, category)
+            and str(sensor.get("sensor_name", "")).lower() in names
+            and str(sensor.get("hardware_name", "")).lower() not in AUTO_ASSIGN_EXCLUDED_HARDWARE
+        ]
+        if not candidates:
+            continue
+        best = max(
+            candidates,
+            key=lambda sensor: (
+                hardware_preference(sensor),
+                _has_live_value(sensor, category),
+                -names.index(str(sensor.get("sensor_name", "")).lower()),
+            ),
+        )
+        mappings[category.key] = best.get("sensor_id")
+    return mappings
+
+
+def _sensor_fits(sensor: Mapping[str, Any], category: TelemetryCategory) -> bool:
+    return sensor.get("sensor_type") == category.sensor_type and sensor.get("hardware_role") in category.hardware_roles
+
+
+def _has_live_value(sensor: Mapping[str, Any], category: TelemetryCategory) -> bool:
+    value = sensor.get("value")
+    if value is None:
+        return False
+    if category.sensor_type == SENSOR_TYPE_TEMPERATURE:
+        low, high = PLAUSIBLE_TEMPERATURE_C
+        return low <= value <= high
+    return True
+
+
+def _hardware_key(sensor: Mapping[str, Any]) -> str:
+    """Hardware part of a sensor identifier ("/gpu-nvidia/0/temperature/0" -> "/gpu-nvidia/0")."""
+    sensor_id = str(sensor.get("sensor_id", ""))
+    if sensor_id.startswith("/") and sensor_id.count("/") >= 3:
+        return sensor_id.rsplit("/", 2)[0]
+    return f"{sensor.get('hardware_type', '')}|{sensor.get('hardware_name', '')}"
+
+
+def _device_index(sensor: Mapping[str, Any]) -> int:
+    match = re.match(r"/[^/]+/(\d+)(?:/|$)", str(sensor.get("sensor_id", "")))
+    return int(match.group(1)) if match else 1_000_000

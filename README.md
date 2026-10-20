@@ -45,8 +45,11 @@ needs to be installed.
 2. Extract it and **keep the whole folder together**: `RWS_StressTester.exe` needs the `Engines\`
    folder next to it. It can run from a USB drive or any writable folder.
 3. Right-click `RWS_StressTester.exe` → **Run as administrator**.
-4. On first launch, click **Assign sensors** and assign at least **CPU Temperature** and
-   **GPU Temperature**. Without them the thermal kill switch cannot protect the hardware.
+4. On first launch the app checks for the **PawnIO** driver and offers to install it (needed for
+   CPU temperature; the running app picks it up, no restart needed). It then assigns the sensors
+   automatically and opens **Review Sensor Assignment**: check each reading shows the right device
+   and a live value, fix any that look wrong, and click **Approve**. **CPU Temperature** and
+   **GPU Temperature** must be assigned, or the thermal kill switch cannot protect the hardware.
 5. Switch on the tests you want, set the minutes for each, and press **Start diagnostics**.
 6. When the run ends, read the verdict (**CERTIFIED STABLE** or **UNSTABLE**) and collect the PDF
    certificate from the `reports\` folder.

@@ -28,6 +28,16 @@ jobs:
         shell: cmd
         run: .venv\Scripts\python -c "import eventlog, orchestrator, report_gen, telemetry, ui; print('imports ok')"
 
+      # The app polls this to notice a PawnIO driver installed while it runs; it must work
+      # (not raise) on a machine without the driver, like this runner.
+      - name: PawnIO detection
+        shell: cmd
+        run: .venv\Scripts\python -c "from telemetry import detect_pawnio_status; s = detect_pawnio_status(); print(s); assert s['error'] == '' and isinstance(s['is_running'], bool) and isinstance(s['is_installed'], bool), s"
+
+      - name: Telemetry session reopens in-process
+        shell: cmd
+        run: .venv\Scripts\python .github\scripts\check_telemetry_reopen.py
+
       # Explorer tags files unzipped from a browser download with a Zone.Identifier stream,
       # which makes .NET Framework refuse to load them. Mark a scratch copy of the LHM files
       # that way and check the failure reproduces and telemetry still loads them.

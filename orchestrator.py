@@ -402,6 +402,8 @@ class StressOrchestrator:
             "include_machine_name": False,
             "certificate_machine_name": "",
             "telemetry_mappings": DEFAULT_TELEMETRY_MAPPINGS.copy(),
+            "sensor_assignment_confirmed": False,
+            "sensors_reviewed_with_pawnio": True,
             "cpu_temp_limit_c": CPU_TEMP_LIMIT_C,
             "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
             "ui_theme": "",  # empty = the UI's default skin
@@ -427,6 +429,13 @@ class StressOrchestrator:
                 value = mappings.get(key)
                 normalized_mappings[key] = str(value).strip() if value else None
             settings["telemetry_mappings"] = normalized_mappings
+
+        if "sensor_assignment_confirmed" in loaded:
+            settings["sensor_assignment_confirmed"] = bool(loaded.get("sensor_assignment_confirmed"))
+        else:
+            # Settings from before the first-run review: a machine with sensors assigned was set up by hand.
+            settings["sensor_assignment_confirmed"] = any(settings["telemetry_mappings"].values())
+        settings["sensors_reviewed_with_pawnio"] = bool(loaded.get("sensors_reviewed_with_pawnio", True))
 
         return settings
 
@@ -480,6 +489,10 @@ class StressOrchestrator:
 
     def get_pawnio_status(self) -> dict[str, Any]:
         return self.telemetry.get_pawnio_status()
+
+    def reload_telemetry(self) -> None:
+        """Rebuild the sensor session, e.g. so a freshly installed PawnIO driver is used."""
+        self.telemetry.reopen()
 
     def check_crash_recovery(self) -> dict[str, Any] | None:
         if not self.state_path.exists():

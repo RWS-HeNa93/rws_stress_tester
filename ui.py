@@ -5,6 +5,8 @@ import math
 import os
 import re
 import queue
+import subprocess
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
@@ -33,7 +35,7 @@ from orchestrator import (
     is_error_line,
     recommended_vram_test_gb,
 )
-from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES
+from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES, auto_assign_sensors
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -120,6 +122,14 @@ def apply_theme(name: str) -> str:
 
 
 UNASSIGNED_SENSOR_OPTION = "Unassigned"
+SENSOR_READING_UNITS = {"Temperature": " °C", "Load": "%", "Power": " W"}
+SENSOR_WINDOW_DESCRIPTION = "Choose which LibreHardwareMonitor sensor feeds each reading. Temperatures drive the thermal kill switch."
+SENSOR_REVIEW_DESCRIPTION = (
+    "Check that each reading names the right device and shows a plausible live value, "
+    "change any that look wrong, then click Approve. Temperatures drive the thermal kill switch."
+)
+# How often the app looks for a PawnIO driver installed while it is running.
+PAWNIO_WATCH_INTERVAL_MS = 3000
 RESERVED_PRESET_NAME = "Custom"
 # Caps keep the Tk text widgets responsive during multi-hour runs with chatty engines.
 CONSOLE_MAX_LINES = 5000
@@ -1428,7 +1438,7 @@ class LogViewerModal(ctk.CTkToplevel):
 
 
 class TelemetrySettingsWindow(ctk.CTkToplevel):
-    def __init__(self, master: "StressTesterApp") -> None:
+    def __init__(self, master: "StressTesterApp", review_notice: str | None = None) -> None:
         super().__init__(master)
         self.app = master
         self.app.telemetry_window = self
@@ -1443,6 +1453,7 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
 
         self.mapping_vars: dict[str, ctk.StringVar] = {}
         self.mapping_menus: dict[str, ctk.CTkOptionMenu] = {}
+        self.reading_labels: dict[str, ctk.CTkLabel] = {}
         self._wrap_update_job: str | None = None
 
         self.grid_rowconfigure(1, weight=1)
@@ -1452,15 +1463,17 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text=terminal_title("Assign Sensors"), font=ui_font(20, "semibold"), text_color=heading_color(), anchor="w").grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
+        self.heading_label = ctk.CTkLabel(header, text=terminal_title("Assign Sensors"), font=ui_font(20, "semibold"), text_color=heading_color(), anchor="w")
+        self.heading_label.grid(row=0, column=0, sticky="w")
+        self.description_label = ctk.CTkLabel(
             header,
-            text="Choose which LibreHardwareMonitor sensor feeds each reading. Temperatures drive the thermal kill switch.",
+            text=SENSOR_WINDOW_DESCRIPTION,
             font=ui_font(12),
             text_color=TEXT_MUTED,
             anchor="w",
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        )
+        self.description_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self.status_label = ctk.CTkLabel(header, text="", font=ui_font(12), text_color=WARNING, anchor="w", justify="left")
         self.status_label.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
@@ -1483,6 +1496,9 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
             row.grid_columnconfigure(0, weight=1)
 
             ctk.CTkLabel(row, text=category.label, font=ui_font(14), text_color=TEXT, anchor="w").grid(row=0, column=0, sticky="w")
+            reading_label = ctk.CTkLabel(row, text="", font=mono_font(12), text_color=TEXT_FAINT, width=80, anchor="e")
+            reading_label.grid(row=0, column=1, sticky="e", padx=(12, 0))
+            self.reading_labels[category.key] = reading_label
             var = ctk.StringVar(value=UNASSIGNED_SENSOR_OPTION)
             menu = build_option_menu(
                 row,
@@ -1491,7 +1507,7 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
                 width=420,
                 command=lambda _selected, category_key=category.key: self._on_mapping_changed(category_key),
             )
-            menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+            menu.grid(row=0, column=2, sticky="e", padx=(16, 0))
             self.mapping_vars[category.key] = var
             self.mapping_menus[category.key] = menu
 
@@ -1499,13 +1515,30 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
         footer.grid(row=2, column=0, sticky="ew", padx=24, pady=(14, 20))
         footer.grid_columnconfigure(10, weight=1)
         build_button(footer, "Refresh sensors", command=self._refresh_sensors, width=140).grid(row=0, column=0, padx=(0, 8))
+        build_button(footer, "Auto-assign", command=self._auto_assign, width=120).grid(row=0, column=1, padx=(0, 8))
         if self.app.pawnio_installer_path is not None:
-            build_button(footer, "Install PawnIO driver", role="danger", command=self._install_pawnio_driver, width=170).grid(row=0, column=1)
-        build_button(footer, "Done", role="primary", command=self._on_close, width=110).grid(row=0, column=11, sticky="e")
+            build_button(footer, "Install PawnIO driver", role="danger", command=self._install_pawnio_driver, width=170).grid(row=0, column=2)
+        self.done_button = build_button(footer, "Done", role="primary", command=self._approve, width=110)
+        self.done_button.grid(row=0, column=11, sticky="e")
 
-        self.app._refresh_telemetry_mapping_state(show_feedback=False, refresh_inventory=True)
+        if review_notice is None:
+            self.app._refresh_telemetry_mapping_state(show_feedback=False, refresh_inventory=True)
+        else:
+            # The caller has just scanned and assigned; show that result as is.
+            self.apply_mapping_state()
+            self.set_review_notice(review_notice)
         self.after(0, self._refresh_label_wraps)
         self.focus()
+
+    def set_review_notice(self, notice: str) -> None:
+        """Turn the window into the review of an automatic assignment, approved with one click."""
+        self.title("Review Sensor Assignment")
+        self.heading_label.configure(text=terminal_title("Review Sensor Assignment"))
+        self.description_label.configure(text=f"{notice} {SENSOR_REVIEW_DESCRIPTION}", text_color=TEXT)
+        self.done_button.configure(text="Approve")
+        self.lift()
+        self.focus_force()
+        self._schedule_wrap_refresh()
 
     def _on_window_configure(self, _event: Any) -> None:
         self._schedule_wrap_refresh()
@@ -1520,8 +1553,10 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
         self.update_idletasks()
-        if self.status_label.winfo_exists():
-            self.status_label.configure(wraplength=max(200, self.status_label.master.winfo_width() - 8))
+        wraplength = max(200, self.status_label.master.winfo_width() - 8)
+        for label in (self.description_label, self.status_label):
+            if label.winfo_exists():
+                label.configure(wraplength=wraplength)
 
     def apply_mapping_state(self) -> None:
         for category in TELEMETRY_CATEGORIES:
@@ -1533,6 +1568,7 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
             if selected not in options:
                 selected = UNASSIGNED_SENSOR_OPTION
             self.mapping_vars[category.key].set(selected)
+            self._show_reading(category, self.app.telemetry_sensor_choices.get(category.key, {}).get(selected))
 
         self.status_label.configure(
             text=self.app.telemetry_status_summary,
@@ -1540,11 +1576,29 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
         )
         self._schedule_wrap_refresh()
 
+    def _show_reading(self, category: Any, sensor_id: str | None) -> None:
+        """Value the selected sensor read at the last scan, so a wrong pick stands out."""
+        sensor = next((item for item in self.app.telemetry_inventory if item.get("sensor_id") == sensor_id), None) if sensor_id else None
+        if sensor is None:
+            text, color = "", TEXT_FAINT
+        elif sensor.get("value") is None:
+            text, color = "no data", WARNING
+        else:
+            text, color = f"{sensor['value']:.0f}{SENSOR_READING_UNITS.get(category.sensor_type, '')}", ACCENT
+        self.reading_labels[category.key].configure(text=text, text_color=color)
+
     def _refresh_sensors(self) -> None:
         self.app._refresh_telemetry_mapping_state(show_feedback=True, refresh_inventory=True)
 
+    def _auto_assign(self) -> None:
+        self.app._apply_auto_assignment(keep_working=False)
+
     def _install_pawnio_driver(self) -> None:
         self.app._launch_pawnio_installer(prompt_first=False)
+
+    def _approve(self) -> None:
+        self.app._confirm_sensor_assignment()
+        self._on_close()
 
     def _on_mapping_changed(self, category_key: str) -> None:
         if category_key not in self.mapping_vars:
@@ -1681,8 +1735,9 @@ class StressTesterApp(ctk.CTk):
         self.telemetry_window: TelemetrySettingsWindow | None = None
         self.thermal_window: ThermalSettingsWindow | None = None
         self.pawnio_installer_path = self._find_pawnio_installer()
-        self.pawnio_status: dict[str, Any] = {"is_installed": None, "version": "", "error": ""}
+        self.pawnio_status: dict[str, Any] = {"is_installed": None, "is_running": None, "version": "", "error": ""}
         self._pawnio_prompted_this_launch = False
+        self._pawnio_watch_job: str | None = None
         self.default_phase_duration_minutes = "5"
         
         # Calculate safe RAM
@@ -1709,7 +1764,7 @@ class StressTesterApp(ctk.CTk):
         self._load_presets_into_menu()
         self._refresh_telemetry_mapping_state(show_feedback=False, refresh_inventory=True, prompt_for_pawnio=False)
         self._show_crash_recovery_if_needed()
-        self.after(150, self._maybe_prompt_pawnio_install)
+        self.after(150, self._run_startup_sensor_checks)
         self.after(250, self._drain_events)
 
     def _build_shell(self) -> None:
@@ -1931,6 +1986,8 @@ class StressTesterApp(ctk.CTk):
     def destroy(self) -> None:
         if getattr(self, "_cursor_job", None):
             self.after_cancel(self._cursor_job)
+        if getattr(self, "_pawnio_watch_job", None):
+            self.after_cancel(self._pawnio_watch_job)
         super().destroy()
 
     def _refresh_selection_summary(self) -> None:
@@ -2099,12 +2156,122 @@ class StressTesterApp(ctk.CTk):
         if self.preset_var.get() not in values:
             self.preset_var.set("Custom")
 
-    def _open_telemetry_settings(self) -> None:
+    def _open_telemetry_settings(self, review_notice: str | None = None) -> None:
         if self.telemetry_window is not None and self.telemetry_window.winfo_exists():
+            if review_notice is not None:
+                self.telemetry_window.set_review_notice(review_notice)
             self.telemetry_window.lift()
             self.telemetry_window.focus()
             return
-        TelemetrySettingsWindow(self)
+        TelemetrySettingsWindow(self, review_notice=review_notice)
+
+    def _run_startup_sensor_checks(self) -> None:
+        """PawnIO first, then assign sensors automatically and ask for a review.
+
+        That happens until the user approves an assignment, and once more on the first launch
+        with PawnIO running when the approved assignment was made without it.
+        """
+        install_started = self._maybe_prompt_pawnio_install()
+        self._start_pawnio_watch()
+        confirmed = bool(self.settings.get("sensor_assignment_confirmed"))
+        pawnio_arrived = (
+            confirmed
+            and not self.settings.get("sensors_reviewed_with_pawnio", True)
+            and self.pawnio_status.get("is_running") is True
+        )
+        if confirmed and not pawnio_arrived:
+            return
+        if install_started:
+            return  # assign once the driver is up so the CPU sensors are included; the PawnIO watch opens the review
+        if pawnio_arrived:
+            notice = "PawnIO driver detected: sensors were re-scanned and assigned automatically."
+        elif self._pawnio_problem():
+            notice = "Sensors were assigned automatically, but without the PawnIO driver CPU readings may be missing."
+        else:
+            notice = "Sensors were assigned automatically."
+        self._auto_assign_and_review(notice)
+
+    def _apply_auto_assignment(self, keep_working: bool) -> bool:
+        """Scan the sensors and assign every reading automatically. Returns False when the scan failed."""
+        self._refresh_telemetry_mapping_state(show_feedback=False, refresh_inventory=True, prompt_for_pawnio=False)
+        if not self.telemetry_inventory:
+            return False  # keep the saved assignment rather than replacing it with nothing
+        keep = self.settings.get("telemetry_mappings") if keep_working else None
+        self._save_telemetry_mappings(auto_assign_sensors(self.telemetry_inventory, keep=keep))
+        return True
+
+    def _auto_assign_and_review(self, notice: str) -> None:
+        # Readings the user picked earlier (approved, or changed in a review closed without
+        # approving) are kept when they still work.
+        if not self._apply_auto_assignment(keep_working=True):
+            notice = "No sensors could be read, so nothing was assigned automatically."
+        self._open_telemetry_settings(review_notice=notice)
+
+    def _confirm_sensor_assignment(self) -> None:
+        confirmation = {
+            "sensor_assignment_confirmed": True,
+            # Unknown (not Windows) counts as reviewed so the review is not asked for again.
+            "sensors_reviewed_with_pawnio": self.pawnio_status.get("is_running") is not False,
+        }
+        if all(self.settings.get(key) == value for key, value in confirmation.items()):
+            return
+        self.settings.update(confirmation)
+        self.orchestrator.save_settings(self.settings)
+
+    def _pawnio_problem(self) -> str:
+        """"missing", "not_running" (installed, driver not loaded) or "" when PawnIO is usable or unknown."""
+        if self.pawnio_status.get("is_installed") is False:
+            return "missing"
+        if self.pawnio_status.get("is_running") is False:
+            return "not_running"
+        return ""
+
+    def _start_pawnio_watch(self) -> None:
+        if self._pawnio_watch_job is None and self.pawnio_status.get("is_running") is False:
+            self._pawnio_watch_job = self.after(PAWNIO_WATCH_INTERVAL_MS, self._watch_pawnio)
+
+    def _watch_pawnio(self) -> None:
+        """Poll for a PawnIO driver installed while the app runs and pick it up without a restart."""
+        self._pawnio_watch_job = None
+        self._refresh_pawnio_status()
+        # Wait out a running test (rebuilding the sensor session would blind the thermal kill switch
+        # for a moment) and any open modal dialog.
+        if not self.pawnio_status.get("is_running") or self.orchestrator.is_session_running() or self.grab_current() is not None:
+            self._pawnio_watch_job = self.after(PAWNIO_WATCH_INTERVAL_MS, self._watch_pawnio)
+            return
+        self._on_pawnio_driver_ready()
+
+    def _on_pawnio_driver_ready(self) -> None:
+        # LibreHardwareMonitor loads PawnIO modules when its session opens, so open a new one.
+        self.orchestrator.reload_telemetry()
+        self._refresh_telemetry_mapping_state(show_feedback=False, refresh_inventory=True, prompt_for_pawnio=False)
+        if self._cpu_temperature_driver_needed():
+            restart = self._show_dialog(
+                "Restart Required",
+                (
+                    "The PawnIO driver is installed, but CPU temperature sensors still read nothing in this session.\n\n"
+                    "Restart the app to finish setting up the sensors. If they still read nothing, restart Windows."
+                ),
+                dialog_type="warning",
+                buttons=[("Later", "secondary", False), ("Restart App", "primary", True)],
+                default_result=False,
+            )
+            if restart and self._restart_app():
+                return
+        self._auto_assign_and_review("PawnIO driver detected: sensors were re-scanned and assigned automatically.")
+
+    def _restart_app(self) -> bool:
+        if getattr(sys, "frozen", False):
+            arguments = subprocess.list2cmdline(sys.argv[1:])
+        else:
+            arguments = subprocess.list2cmdline([str(Path(sys.argv[0]).resolve()), *sys.argv[1:]])
+        # runas keeps the new instance elevated like this one; sensors need administrator rights.
+        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, arguments or None, str(self.root_path), 1)
+        if result <= 32:
+            self._show_error("Restart Failed", "Unable to start the app again. Close it and start it again manually.")
+            return False
+        self._on_close()
+        return True
 
     def _open_thermal_settings(self) -> None:
         if self.thermal_window is not None and self.thermal_window.winfo_exists():
@@ -2117,7 +2284,7 @@ class StressTesterApp(ctk.CTk):
         try:
             self.pawnio_status = self.orchestrator.get_pawnio_status()
         except Exception as exc:
-            self.pawnio_status = {"is_installed": None, "version": "", "error": str(exc)}
+            self.pawnio_status = {"is_installed": None, "is_running": None, "version": "", "error": str(exc)}
 
     def _find_pawnio_installer(self) -> Path | None:
         candidate_paths = [
@@ -2150,57 +2317,59 @@ class StressTesterApp(ctk.CTk):
         ]
         return bool(compatible_sensors) and all(sensor.get("value") is None for sensor in compatible_sensors)
 
-    def _maybe_prompt_pawnio_install(self) -> None:
+    def _maybe_prompt_pawnio_install(self) -> bool:
+        """Offer the PawnIO installer once per launch when the driver is missing. Returns True if it was started."""
         if self._pawnio_prompted_this_launch:
-            return
-        driver_missing = self.pawnio_status.get("is_installed") is False
+            return False
+        problem = self._pawnio_problem()
         heuristic_driver_needed = self.pawnio_status.get("is_installed") is None and self._cpu_temperature_driver_needed()
-        if not driver_missing and not heuristic_driver_needed:
-            return
+        if not problem and not heuristic_driver_needed:
+            return False
 
         self._pawnio_prompted_this_launch = True
-        if driver_missing:
-            should_install = self._show_dialog(
-                "PawnIO Driver Not Installed",
-                (
-                    "PawnIO driver is not installed.\n\n"
-                    "Sensors and telemetry might not work correctly until it is installed.\n\n"
-                    "After the driver is installed, close the app and launch it again.\n\n"
-                    "Do you want to install the PawnIO driver now?"
-                ),
-                dialog_type="warning",
-                buttons=[
-                    ("Cancel", "secondary", False),
-                    ("Install PawnIO Driver", "danger", True),
-                ],
-                default_result=False,
+        no_restart_note = "The app picks up the driver as soon as the installation finishes; there is no need to restart it."
+        if problem == "missing":
+            title = "PawnIO Driver Not Installed"
+            message = (
+                "The PawnIO driver is not installed. Without it the CPU temperature cannot be read, "
+                "so the thermal kill switch cannot protect the CPU.\n\n"
+                f"{no_restart_note}\n\n"
+                "Do you want to install the PawnIO driver now?"
+            )
+        elif problem == "not_running":
+            title = "PawnIO Driver Not Running"
+            message = (
+                "The PawnIO driver is installed but not running, so CPU sensors cannot be read.\n\n"
+                "Restart Windows, or reinstall the driver now. "
+                f"{no_restart_note}"
             )
         else:
-            should_install = self._show_dialog(
-                "CPU Telemetry Driver Required",
-                (
-                    "LibreHardwareMonitor detected CPU temperature sensors, but none of them are returning live data.\n\n"
-                    "This usually means the PawnIO driver is not installed.\n\n"
-                    "Do you want to launch the PawnIO installer now?"
-                ),
-                dialog_type="warning",
-                buttons=[
-                    ("Cancel", "secondary", False),
-                    ("Install PawnIO Driver", "danger", True),
-                ],
-                default_result=False,
+            title = "CPU Telemetry Driver Required"
+            message = (
+                "LibreHardwareMonitor detected CPU temperature sensors, but none of them are returning live data.\n\n"
+                "This usually means the PawnIO driver is not installed.\n\n"
+                "Do you want to launch the PawnIO installer now?"
             )
-        if should_install:
-            self._launch_pawnio_installer(prompt_first=False)
+        should_install = self._show_dialog(
+            title,
+            message,
+            dialog_type="warning",
+            buttons=[
+                ("Cancel", "secondary", False),
+                ("Install PawnIO Driver", "danger", True),
+            ],
+            default_result=False,
+        )
+        return bool(should_install) and self._launch_pawnio_installer(prompt_first=False)
 
-    def _launch_pawnio_installer(self, prompt_first: bool = True) -> None:
+    def _launch_pawnio_installer(self, prompt_first: bool = True) -> bool:
         installer_path = self.pawnio_installer_path
         if installer_path is None or not installer_path.exists():
             self._show_error(
                 "Installer Missing",
                 "PawnIO installer was not found in the Engines folder.",
             )
-            return
+            return False
 
         if prompt_first:
             should_launch = self._ask_yes_no(
@@ -2210,7 +2379,7 @@ class StressTesterApp(ctk.CTk):
                 cancel_label="Cancel",
             )
             if not should_launch:
-                return
+                return False
 
         result = ctypes.windll.shell32.ShellExecuteW(
             None,
@@ -2225,8 +2394,11 @@ class StressTesterApp(ctk.CTk):
                 "Installer Launch Failed",
                 f"Unable to launch {installer_path.name}.",
             )
-            return
+            return False
         # Do not show a follow-up modal here; it steals focus back from the installer.
+        # The PawnIO watch notices the driver once the installation finishes.
+        self._start_pawnio_watch()
+        return True
 
     def _refresh_telemetry_mapping_state(
         self,
@@ -2380,8 +2552,11 @@ class StressTesterApp(ctk.CTk):
             parts.append("Unassigned categories: " + ", ".join(unassigned_categories) + ".")
         if no_data_categories:
             parts.append("Mapped sensors with no live reading: " + ", ".join(no_data_categories) + ".")
-        if self.pawnio_status.get("is_installed") is False:
+        pawnio_problem = self._pawnio_problem()
+        if pawnio_problem == "missing":
             parts.append("PawnIO driver is not installed. Sensors and telemetry might not work correctly until it is installed.")
+        elif pawnio_problem == "not_running":
+            parts.append("PawnIO driver is installed but not running. Restart Windows or reinstall the driver.")
         elif show_feedback:
             parts.append("Telemetry mappings refreshed.")
 
@@ -2393,8 +2568,8 @@ class StressTesterApp(ctk.CTk):
             brief_parts.append("mapping incomplete")
         elif no_data_categories:
             brief_parts.append("some readings offline")
-        elif self.pawnio_status.get("is_installed") is False:
-            brief_parts.append("PawnIO missing")
+        elif pawnio_problem:
+            brief_parts.append("PawnIO missing" if pawnio_problem == "missing" else "PawnIO not running")
         self.telemetry_status_brief = " | ".join(brief_parts)
         self.telemetry_status_color = (
             DANGER
@@ -2403,15 +2578,17 @@ class StressTesterApp(ctk.CTk):
             if (
                 unassigned_categories
                 or no_data_categories
-                or self.pawnio_status.get("is_installed") is False
+                or pawnio_problem
             )
             else ACCENT
         )
         if invalid_saved_categories or unassigned_categories:
             self.telemetry_header_status_text = "●  Some sensors are not assigned"
             self.telemetry_header_status_color = DANGER
-        elif self.pawnio_status.get("is_installed") is False:
-            self.telemetry_header_status_text = "●  PawnIO driver missing"
+        elif pawnio_problem:
+            self.telemetry_header_status_text = (
+                "●  PawnIO driver missing" if pawnio_problem == "missing" else "●  PawnIO driver not running"
+            )
             self.telemetry_header_status_color = WARNING
         else:
             self.telemetry_header_status_text = "●  All sensors assigned"

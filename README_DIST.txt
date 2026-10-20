@@ -22,8 +22,12 @@ QUICK START
    OK, then extract it. (Otherwise Windows may block the bundled engines.)
 2. Keep the whole folder together. RWS_StressTester.exe needs the Engines\ folder next to it.
 3. Right-click RWS_StressTester.exe > Run as administrator.
-4. First time on a machine: click Assign sensors and assign at least CPU Temperature and
-   GPU Temperature. Without them the thermal kill switch cannot protect the hardware.
+4. First time on a machine: the app offers to install the PawnIO driver if it is missing
+   (needed for CPU temperature; no restart needed, the running app picks it up). It then
+   assigns the sensors automatically and opens Review Sensor Assignment: check each reading
+   shows the right device and a live value, fix any that look wrong, and click Approve.
+   CPU Temperature and GPU Temperature must be assigned, or the thermal kill switch cannot
+   protect the hardware.
 5. Switch on the tests to run, set minutes for each, and press Start diagnostics.
 6. When the run ends, read the verdict, open any failed phase's log, and collect the PDF
    from the reports\ folder.
@@ -139,8 +143,15 @@ Setup screen
 Assign Sensors
   Links the hardware sensors found on this PC to the app's readings: CPU and GPU temperature,
   CPU and GPU load, RAM load, storage load, CPU and GPU power. Saved in settings.json.
+  - Each reading shows the value its sensor read at the last scan.
   - Refresh sensors re-scans the hardware.
-  - Install PawnIO driver appears when CPU temperature needs the PawnIO driver.
+  - Auto-assign picks a sensor for every reading again (discrete GPU before integrated,
+    system drive first).
+  - Install PawnIO driver runs the bundled installer. The app watches for the driver and, once
+    it is running, re-scans the sensors and asks you to review the assignment again.
+  - Until an assignment is approved, it is made automatically and shown for review at every
+    launch. It is also shown once more on the first launch with PawnIO running if the last
+    approval was made without it.
   - The app warns when assignments are missing, invalid or return no live data.
 
 Thermal Settings
@@ -202,6 +213,8 @@ Telemetry shows nothing or Unassigned
   - Run as administrator.
   - Open Assign sensors and assign the readings. Assignments are per machine type.
   - If CPU temperature sensors exist but read nothing, use Install PawnIO driver.
+  - If they still read nothing after the driver is installed, the app offers to restart itself;
+    if that does not help, restart Windows.
 
 "Windows event log check unavailable" in the log
   - The run still works, but Windows-logged hardware errors are not checked. Run as
