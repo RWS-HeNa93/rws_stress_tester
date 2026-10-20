@@ -52,7 +52,8 @@ RAM  - Fill to (%) and Safety margin (GB): how full the memory gets during the t
   The safety margin wins when the two disagree: on a 16 GB PC with a 2 GB margin, memory
   stops at about 88%. Finds unstable RAM, memory controller and fabric settings
   (XMP/EXPO, timings, SoC voltage). Start is blocked if Fill to is not 10-100%, the margin
-  is below 0.5 GB, or less than 1 GB would be left to test.
+  is below 0.5 GB, or less than 1 GB would be left to test. If other programs use up the
+  memory before the phase starts, the phase fails with a note saying so.
 
 GPU  - Res: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
   FurMark at full load with its artifact scanner, which checks every frame for corruption.
@@ -223,7 +224,7 @@ The app or an engine does not start
 Telemetry shows nothing or Unassigned
   - Run as administrator.
   - Open Assign sensors and assign the readings. Assignments are per machine type.
-  - If CPU temperature sensors exist but read nothing, use Install PawnIO driver.
+  - If CPU temperature or clock sensors exist but read nothing, use Install PawnIO driver.
   - If they still read nothing after the driver is installed, the app offers to restart itself;
     if that does not help, restart Windows.
 
