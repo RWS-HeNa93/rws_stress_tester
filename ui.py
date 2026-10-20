@@ -28,11 +28,17 @@ from orchestrator import (
     EVENT_TELEMETRY,
     EVENT_PHASE_LOGS,
     FURMARK_VRAM_TEST_SIZES_GB,
+    RAM_FILL_PERCENT,
+    RAM_FILL_PERCENT_RANGE,
+    RAM_SAFETY_MARGIN_GB,
+    RAM_SAFETY_MARGIN_MIN_GB,
+    RAM_TEST_MIN_GB,
     STDERR_PREFIX,
     StressOrchestrator,
     VRAM_HEADROOM_GB,
     detect_vram_gb,
     is_error_line,
+    ram_test_size_gb,
     recommended_vram_test_gb,
 )
 from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES, TELEMETRY_CATEGORY_MAP, auto_assign_sensors
@@ -357,7 +363,7 @@ def status_colors(status: str) -> tuple[str, str]:
 
 
 class TestPhaseRow(ctk.CTkFrame):
-    """One selectable test phase: switch, name and description, an optional option field, minutes."""
+    """One selectable test phase: switch, name and description, optional option fields, minutes."""
 
     def __init__(
         self,
@@ -366,7 +372,7 @@ class TestPhaseRow(ctk.CTkFrame):
         description: str,
         enabled_var: ctk.BooleanVar,
         duration_var: ctk.StringVar,
-        extra_field: dict[str, Any] | None = None,
+        extra_fields: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(parent, fg_color="transparent", corner_radius=RADIUS)
         self.enabled_var = enabled_var
@@ -391,15 +397,22 @@ class TestPhaseRow(ctk.CTkFrame):
         self.description_label = ctk.CTkLabel(self, text=description, font=ui_font(12), text_color=TEXT_FAINT, anchor="w")
         self.description_label.grid(row=1, column=1, sticky="nw", pady=(0, 9))
 
-        if extra_field:
+        if extra_fields:
             option = ctk.CTkFrame(self, fg_color="transparent")
             option.grid(row=0, column=2, rowspan=2, sticky="e", padx=(12, 0))
-            ctk.CTkLabel(option, text=extra_field["label"], font=ui_font(12), text_color=TEXT_MUTED).grid(row=0, column=0, padx=(0, 8))
-            if extra_field["kind"] == "entry":
-                widget = build_entry(option, extra_field["variable"], width=extra_field.get("width", 80))
-            else:
-                widget = build_option_menu(option, extra_field["variable"], extra_field["values"], width=extra_field.get("width", 90))
-            widget.grid(row=0, column=1)
+            # Several fields stack one per line, so the description keeps its width.
+            for index, field in enumerate(extra_fields):
+                pady = (0, 6) if index < len(extra_fields) - 1 else 0
+                ctk.CTkLabel(option, text=field["label"], font=ui_font(12), text_color=TEXT_MUTED).grid(row=index, column=0, sticky="e", padx=(0, 8), pady=pady)
+                if field["kind"] == "entry":
+                    widget = build_entry(option, field["variable"], width=field.get("width", 80))
+                else:
+                    widget = build_option_menu(option, field["variable"], field["values"], width=field.get("width", 90))
+                widget.grid(row=index, column=1, pady=pady)
+                if field.get("unit"):
+                    ctk.CTkLabel(option, text=field["unit"], font=ui_font(12), text_color=TEXT_MUTED, width=22, anchor="w").grid(
+                        row=index, column=2, padx=(6, 0), pady=pady
+                    )
 
         minutes = ctk.CTkFrame(self, fg_color="transparent")
         minutes.grid(row=0, column=3, rowspan=2, sticky="e", padx=(20, 12))
@@ -1760,12 +1773,11 @@ class StressTesterApp(ctk.CTk):
         self._pawnio_watch_job: str | None = None
         self.default_phase_duration_minutes = "5"
         
-        # Calculate safe RAM
-        available_mb = int(psutil.virtual_memory().available / (1024 * 1024))
-        safe_ram_gb = max(1.0, round((available_mb - 2560) / 1024, 1))
-        self.default_ram_gb = str(safe_ram_gb)
+        self.default_ram_fill_percent = f"{RAM_FILL_PERCENT:g}"
+        self.default_ram_safety_margin_gb = f"{RAM_SAFETY_MARGIN_GB:.1f}"
         self.default_gpu_resolution = "1280x720"
-        self.ram_gb_var = ctk.StringVar(value=self.default_ram_gb)
+        self.ram_fill_var = ctk.StringVar(value=self.default_ram_fill_percent)
+        self.ram_margin_var = ctk.StringVar(value=self.default_ram_safety_margin_gb)
         self.gpu_res_var = ctk.StringVar(value=self.default_gpu_resolution)
         self.detected_vram_gb = detect_vram_gb()
         self.vram_size_options = [str(size) for size in FURMARK_VRAM_TEST_SIZES_GB]
@@ -1868,11 +1880,14 @@ class StressTesterApp(ctk.CTk):
 
         test_rows = [
             ("cpu", "CPU", "y-cruncher · cores, boost clocks and voltage", None),
-            ("ram", "RAM", "y-cruncher · memory and memory controller", {"label": "GB", "kind": "entry", "variable": self.ram_gb_var, "width": 70}),
-            ("gpu", "GPU", "FurMark · core, power and cooling", {"label": "Resolution", "kind": "entry", "variable": self.gpu_res_var, "width": 100}),
-            ("vram", "VRAM", "FurMark · video memory", {"label": "GB", "kind": "menu", "variable": self.vram_gb_var, "values": self.vram_size_options, "width": 70}),
-            ("storage_read", "Storage read", "DiskSpd · random reads", {"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 90}),
-            ("storage_write", "Storage write", "DiskSpd · random writes", {"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 90}),
+            ("ram", "RAM", "y-cruncher · memory and memory controller", [
+                {"label": "Fill to", "kind": "entry", "variable": self.ram_fill_var, "width": 56, "unit": "%"},
+                {"label": "Safety margin", "kind": "entry", "variable": self.ram_margin_var, "width": 56, "unit": "GB"},
+            ]),
+            ("gpu", "GPU", "FurMark · core, power and cooling", [{"label": "Resolution", "kind": "entry", "variable": self.gpu_res_var, "width": 100}]),
+            ("vram", "VRAM", "FurMark · video memory", [{"label": "GB", "kind": "menu", "variable": self.vram_gb_var, "values": self.vram_size_options, "width": 70}]),
+            ("storage_read", "Storage read", "DiskSpd · random reads", [{"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 90}]),
+            ("storage_write", "Storage write", "DiskSpd · random writes", [{"label": "Drive", "kind": "menu", "variable": self.target_drive_var, "values": self.drive_options, "width": 90}]),
             ("psu", "PSU", "y-cruncher + FurMark · combined peak power", None),
         ]
         self.phase_cards.clear()
@@ -2796,7 +2811,8 @@ class StressTesterApp(ctk.CTk):
             var.set(False)
         for var in self.duration_vars.values():
             var.set(self.default_phase_duration_minutes)
-        self.ram_gb_var.set(self.default_ram_gb)
+        self.ram_fill_var.set(self.default_ram_fill_percent)
+        self.ram_margin_var.set(self.default_ram_safety_margin_gb)
         self.gpu_res_var.set(self.default_gpu_resolution)
         self.vram_gb_var.set(self.default_vram_gb)
         target_drive = self.default_target_drive if self.default_target_drive in self.drive_options else self.drive_options[0]
@@ -2815,9 +2831,13 @@ class StressTesterApp(ctk.CTk):
         for key, value in (durations_map.items() if isinstance(durations_map, dict) else []):
             if key in self.duration_vars:
                 self.duration_vars[key].set(str(value))
-        if "ram_gb" in payload:
-            self.ram_gb_var.set(str(payload["ram_gb"]))
-            
+        # Presets from before the percentage fields stored "ram_gb"; those keep the current values.
+        if "ram_fill_percent" in payload:
+            self.ram_fill_var.set(f"{payload['ram_fill_percent']:g}")
+        if "ram_safety_margin_gb" in payload:
+            self.ram_margin_var.set(f"{payload['ram_safety_margin_gb']:g}")
+
+
         if "target_drive" in payload:
             valid_drives = [opt.lower() for opt in self.drive_options]
             if str(payload["target_drive"]).lower() in valid_drives:
@@ -2853,11 +2873,9 @@ class StressTesterApp(ctk.CTk):
             except ValueError:
                 durations[key] = 0
                 
-        try:
-            ram_gb = float(self.ram_gb_var.get() or 0)
-        except ValueError:
-            ram_gb = 0.0
-            
+        ram_fill_percent = self._parse_float(self.ram_fill_var.get(), RAM_FILL_PERCENT)
+        ram_safety_margin_gb = self._parse_float(self.ram_margin_var.get(), RAM_SAFETY_MARGIN_GB)
+
         gpu_resolution = self.gpu_res_var.get()
         generate_report = self.generate_report_var.get()
             
@@ -2869,7 +2887,8 @@ class StressTesterApp(ctk.CTk):
             "customer_name": self.customer_name_var.get().strip(),
             "include_machine_name": self.include_machine_name_var.get(),
             "certificate_machine_name": self.certificate_machine_name_var.get().strip(),
-            "ram_gb": ram_gb,
+            "ram_fill_percent": ram_fill_percent,
+            "ram_safety_margin_gb": ram_safety_margin_gb,
             "target_drive": self.target_drive_var.get(),
             "gpu_resolution": gpu_resolution,
             "vram_gb": int(self.vram_gb_var.get()),
@@ -2943,23 +2962,25 @@ class StressTesterApp(ctk.CTk):
             self._show_error("Validation Error", "Select at least one test phase.")
             return None
 
-        ram_gb = 0.0
+        ram_fill_percent = self._parse_float(self.ram_fill_var.get(), float("nan"))
+        ram_safety_margin_gb = self._parse_float(self.ram_margin_var.get(), float("nan"))
         if selections.get("ram", 0) > 0:
-            try:
-                ram_gb = float(self.ram_gb_var.get().strip())
-            except ValueError:
-                ram_gb = float("nan")
-            if not math.isfinite(ram_gb) or ram_gb <= 0:
-                self._show_error("Validation Error", "RAM to test must be a number greater than zero.")
+            low, high = RAM_FILL_PERCENT_RANGE
+            if not (math.isfinite(ram_fill_percent) and low <= ram_fill_percent <= high):
+                self._show_error("Validation Error", f"RAM Fill to must be a percentage between {low:g} and {high:g}.")
                 return None
-
-            # Keep a hard OS minimum buffer of 256 MB so the system does not lock up.
-            available_mb = int(psutil.virtual_memory().available / (1024 * 1024))
-            max_allowed_gb = (available_mb - 256) / 1024.0
-            if ram_gb > max_allowed_gb:
+            if not (math.isfinite(ram_safety_margin_gb) and ram_safety_margin_gb >= RAM_SAFETY_MARGIN_MIN_GB):
+                self._show_error("Validation Error", f"RAM safety margin must be at least {RAM_SAFETY_MARGIN_MIN_GB:g} GB.")
+                return None
+            # The phase sizes itself when it starts; check now that it would have something to test.
+            test_gb = ram_test_size_gb(ram_fill_percent, ram_safety_margin_gb)
+            if test_gb < RAM_TEST_MIN_GB:
+                in_use_percent = psutil.virtual_memory().percent
                 self._show_error(
                     "Validation Error",
-                    f"Cannot allocate {ram_gb:g} GB RAM.\nAvailable for testing is approx {max(0.0, max_allowed_gb):.1f} GB.",
+                    f"{in_use_percent:.0f}% of memory is already in use, so filling it to {ram_fill_percent:g}% "
+                    f"with a {ram_safety_margin_gb:g} GB safety margin leaves only {test_gb:.1f} GB to test.\n"
+                    f"Raise Fill to, lower the safety margin or close other programs.",
                 )
                 return None
 
@@ -2984,7 +3005,14 @@ class StressTesterApp(ctk.CTk):
             ):
                 return None
 
-        return selections, ram_gb, vram_gb
+        return selections, ram_fill_percent, ram_safety_margin_gb, vram_gb
+
+    @staticmethod
+    def _parse_float(text: str, default: float) -> float:
+        try:
+            return float(text.strip())
+        except ValueError:
+            return default
 
     def _confirm_thermal_protection(self, selections: dict[str, int]) -> bool:
         mappings = self.settings.get("telemetry_mappings", {}) or {}
@@ -3028,7 +3056,7 @@ class StressTesterApp(ctk.CTk):
         validated = self._validate_start_inputs(payload)
         if validated is None:
             return
-        selections, ram_gb, vram_gb = validated
+        selections, ram_fill_percent, ram_safety_margin_gb, vram_gb = validated
 
         if not self._confirm_thermal_protection(selections):
             return
@@ -3040,7 +3068,8 @@ class StressTesterApp(ctk.CTk):
             self.orchestrator.start_session(
                 selections,
                 self.settings,
-                ram_gb=ram_gb,
+                ram_fill_percent=ram_fill_percent,
+                ram_safety_margin_gb=ram_safety_margin_gb,
                 target_drive=payload["target_drive"],
                 gpu_resolution=payload["gpu_resolution"],
                 generate_report=payload["generate_report"],

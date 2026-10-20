@@ -61,7 +61,7 @@ Phases always run in this order. Each one can be switched on or off and given it
 | Phase | Engine | Finds |
 |---|---|---|
 | **CPU** | y-cruncher (SFTv4, BKT, VT3, SNT, SVT, N63) | Unstable core voltage, boost and Curve Optimizer / undervolt settings |
-| **RAM** | y-cruncher (FFTv4, VT3, N63) on the amount of memory you choose | Unstable XMP/EXPO, timings, memory controller and SoC voltage |
+| **RAM** | y-cruncher (VT3, FFTv4, N63) filling memory to the percentage you choose, with a safety margin kept free | Unstable XMP/EXPO, timings, memory controller and SoC voltage |
 | **GPU** | FurMark with its artifact scanner | GPU core instability, cooling problems, failing cards |
 | **VRAM** | FurMark while filling the video memory you choose and reading it back every frame | Faulty or overheating video memory |
 | **Storage (R) / (W)** | DiskSpd, random 64 KB I/O, 4 threads × 32 outstanding I/Os | Failing drives, cables and controllers |

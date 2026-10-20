@@ -87,6 +87,14 @@ YCRUNCHER_SCHEDULES: dict[str, tuple[str, ...]] = {
     # Maximum sustained CPU power alongside FurMark: in-cache tests only, no memory stalls.
     "psu": ("SFTv4", "SNT", "SVT"),
 }
+# RAM phase size: y-cruncher gets enough memory to bring the whole system to RAM_FILL_PERCENT of
+# physical memory, worked out when the phase starts, but never so much that less than the safety
+# margin stays free for Windows and this app (running out pages to disk and stalls or fails the test).
+RAM_FILL_PERCENT = 90.0
+RAM_FILL_PERCENT_RANGE = (10.0, 100.0)
+RAM_SAFETY_MARGIN_GB = 2.0
+RAM_SAFETY_MARGIN_MIN_GB = 0.5
+RAM_TEST_MIN_GB = 1.0
 # Each test needs several verified iterations (and some heat soak) to be worth running; large-memory
 # RAM iterations take much longer than in-cache CPU ones.
 YCRUNCHER_MIN_SLICE_SECONDS = {"cpu": 60, "ram": 120, "psu": 60}
@@ -209,6 +217,15 @@ def select_ycruncher_tests(test_key: str, duration_seconds: float) -> tuple[str,
     return tuple(sorted(selected, key=YCRUNCHER_RUN_ORDER.index))
 
 
+def ram_test_size_gb(fill_percent: float, safety_margin_gb: float) -> float:
+    """Memory for y-cruncher so the system reaches fill_percent in use, leaving safety_margin_gb free."""
+    memory = psutil.virtual_memory()
+    gib = 1024 ** 3
+    total_gb = memory.total / gib
+    in_use_gb = (memory.total - memory.available) / gib
+    return max(0.0, min(total_gb * fill_percent / 100 - in_use_gb, total_gb - in_use_gb - safety_margin_gb))
+
+
 def _is_storage_stall(line: str) -> bool:
     match = DISKSPD_MAX_LATENCY_PATTERN.match(line)
     if not match:
@@ -287,7 +304,9 @@ class TestDefinition:
     key: str
     label: str
     duration_minutes: int
-    ram_gb: float = 0.0
+    ram_fill_percent: float = RAM_FILL_PERCENT
+    ram_safety_margin_gb: float = RAM_SAFETY_MARGIN_GB
+    ram_gb: float = 0.0  # worked out when the RAM phase starts
     target_drive: str = ""
     gpu_resolution: str = "1280x720"
     vram_gb: int = 0
@@ -609,11 +628,11 @@ class StressOrchestrator:
         except OSError:
             pass
 
-    def start_session(self, selections: dict[str, int], settings: dict[str, Any], ram_gb: float = 0.0, target_drive: str = "", gpu_resolution: str = "1280x720", generate_report: bool = True, vram_gb: int = 0) -> None:
+    def start_session(self, selections: dict[str, int], settings: dict[str, Any], ram_fill_percent: float = RAM_FILL_PERCENT, ram_safety_margin_gb: float = RAM_SAFETY_MARGIN_GB, target_drive: str = "", gpu_resolution: str = "1280x720", generate_report: bool = True, vram_gb: int = 0) -> None:
         if self.session_thread and self.session_thread.is_alive():
             raise RuntimeError("A diagnostics session is already running.")
 
-        planned_tests = self._build_plan(selections, ram_gb, target_drive, gpu_resolution, vram_gb)
+        planned_tests = self._build_plan(selections, ram_fill_percent, ram_safety_margin_gb, target_drive, gpu_resolution, vram_gb)
 
         self.configure_telemetry(settings.get("telemetry_mappings"))
         self.configure_thermal_limits(settings)
@@ -1308,17 +1327,25 @@ class StressOrchestrator:
         sanitized = sanitized.rstrip(".")
         return sanitized
 
-    def _build_plan(self, selections: dict[str, int], ram_gb: float, target_drive: str, gpu_resolution: str, vram_gb: int = 0) -> list[TestDefinition]:
+    def _build_plan(self, selections: dict[str, int], ram_fill_percent: float, ram_safety_margin_gb: float, target_drive: str, gpu_resolution: str, vram_gb: int = 0) -> list[TestDefinition]:
         catalog = self._test_catalog()
         plan = []
         for key in ("cpu", "ram", "gpu", "vram", "storage_read", "storage_write", "psu"):
             duration = int(selections.get(key, 0) or 0)
             if duration > 0:
-                plan.append(TestDefinition(key=key, label=catalog[key], duration_minutes=duration, ram_gb=ram_gb, target_drive=target_drive, gpu_resolution=gpu_resolution, vram_gb=vram_gb))
+                plan.append(TestDefinition(
+                    key=key, label=catalog[key], duration_minutes=duration,
+                    ram_fill_percent=ram_fill_percent, ram_safety_margin_gb=ram_safety_margin_gb,
+                    target_drive=target_drive, gpu_resolution=gpu_resolution, vram_gb=vram_gb,
+                ))
         if not plan:
             raise RuntimeError("Select at least one test with a duration greater than zero.")
-        if any(test.key == "ram" for test in plan) and not (math.isfinite(ram_gb) and ram_gb > 0):
-            raise RuntimeError("RAM to test must be a number greater than zero.")
+        if any(test.key == "ram" for test in plan):
+            low, high = RAM_FILL_PERCENT_RANGE
+            if not (math.isfinite(ram_fill_percent) and low <= ram_fill_percent <= high):
+                raise RuntimeError(f"RAM fill must be between {low:g} and {high:g}%.")
+            if not (math.isfinite(ram_safety_margin_gb) and ram_safety_margin_gb >= RAM_SAFETY_MARGIN_MIN_GB):
+                raise RuntimeError(f"RAM safety margin must be at least {RAM_SAFETY_MARGIN_MIN_GB:g} GB.")
         if any(test.key == "vram" for test in plan) and vram_gb not in FURMARK_VRAM_TEST_SIZES_GB:
             sizes = ", ".join(str(size) for size in FURMARK_VRAM_TEST_SIZES_GB)
             raise RuntimeError(f"VRAM to test must be one of: {sizes} GB.")
@@ -1341,6 +1368,17 @@ class StressOrchestrator:
         if test.key == "cpu":
             return [self._build_ycruncher_command(seconds, native_log, memory_mb=None, algorithms=select_ycruncher_tests("cpu", seconds))]
         if test.key == "ram":
+            # Sized now rather than at Start, from the memory Windows and other programs use at this moment.
+            test.ram_gb = round(ram_test_size_gb(test.ram_fill_percent, test.ram_safety_margin_gb), 1)
+            if test.ram_gb < RAM_TEST_MIN_GB:
+                raise RuntimeError(
+                    f"only {test.ram_gb:g} GB could be tested at {test.ram_fill_percent:g}% with a "
+                    f"{test.ram_safety_margin_gb:g} GB safety margin; too much memory was already in use"
+                )
+            self._emit(
+                EVENT_STATUS,
+                message=f"{test.label}: testing {test.ram_gb:g} GB (fill to {test.ram_fill_percent:g}%, {test.ram_safety_margin_gb:g} GB safety margin)",
+            )
             return [self._build_ycruncher_command(seconds, native_log, memory_mb=int(test.ram_gb * 1024), algorithms=select_ycruncher_tests("ram", seconds))]
         if test.key == "gpu":
             return [self._build_furmark_command(seconds, test.gpu_resolution, self._furmark_log_suffix(test.key))]

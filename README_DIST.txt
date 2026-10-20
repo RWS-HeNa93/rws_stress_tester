@@ -44,11 +44,15 @@ CPU
   working sets, and the load changes between tests. Finds unstable core voltage, boost and
   Curve Optimizer / undervolt settings.
 
-RAM  - Cap (GB): how much memory to test
-  y-cruncher tests FFTv4, VT3, N63 using the chosen amount. Finds unstable RAM, memory
-  controller and fabric settings (XMP/EXPO, timings, SoC voltage).
-  The field is prefilled from currently available memory. Start is blocked if the value is
-  not a number, is zero, or is more than the system can spare.
+RAM  - Fill to (%) and Safety margin (GB): how full the memory gets during the test
+  y-cruncher tests VT3, FFTv4, N63 with enough memory to bring the whole system's memory
+  use to the Fill to percentage (default 90%), while always leaving at least the safety
+  margin free for Windows and this app (default 2 GB). The amount is worked out when the
+  phase starts, from what is in use at that moment, and the certificate shows it in GB.
+  The safety margin wins when the two disagree: on a 16 GB PC with a 2 GB margin, memory
+  stops at about 88%. Finds unstable RAM, memory controller and fabric settings
+  (XMP/EXPO, timings, SoC voltage). Start is blocked if Fill to is not 10-100%, the margin
+  is below 0.5 GB, or less than 1 GB would be left to test.
 
 GPU  - Res: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
   FurMark at full load with its artifact scanner, which checks every frame for corruption.
