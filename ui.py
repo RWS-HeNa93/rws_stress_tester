@@ -35,7 +35,7 @@ from orchestrator import (
     is_error_line,
     recommended_vram_test_gb,
 )
-from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES, auto_assign_sensors
+from telemetry import CPU_TEMP_LIMIT_C, GPU_TEMP_LIMIT_C, TELEMETRY_CATEGORIES, TELEMETRY_CATEGORY_MAP, auto_assign_sensors
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -122,7 +122,26 @@ def apply_theme(name: str) -> str:
 
 
 UNASSIGNED_SENSOR_OPTION = "Unassigned"
-SENSOR_READING_UNITS = {"Temperature": " °C", "Load": "%", "Power": " W"}
+SENSOR_READING_UNITS = {"Temperature": " °C", "Load": "%", "Power": " W", "Clock": " MHz"}
+# Live telemetry cards on the dashboard: device -> (title, ((reading, label, has a bar), ...)).
+# Clocks have no natural maximum, so they show the value only.
+TELEMETRY_CARDS: dict[str, tuple[str, tuple[tuple[str, str, bool], ...]]] = {
+    "cpu": ("CPU", (
+        ("cpu_temp", "Temperature", True),
+        ("cpu_load", "Load", True),
+        ("cpu_clock", "Clock", False),
+        ("cpu_power", "Power", True),
+    )),
+    "gpu": ("GPU", (
+        ("gpu_temp", "Temperature", True),
+        ("gpu_load", "Load", True),
+        ("gpu_clock", "Core clock", False),
+        ("vram_clock", "Memory clock", False),
+        ("gpu_power", "Power", True),
+    )),
+    "ram": ("RAM", (("ram_load", "Total load", True),)),
+    "storage": ("Storage", (("storage_load", "Activity", True),)),
+}
 SENSOR_WINDOW_DESCRIPTION = "Choose which LibreHardwareMonitor sensor feeds each reading. Temperatures drive the thermal kill switch."
 SENSOR_REVIEW_DESCRIPTION = (
     "Check that each reading names the right device and shows a plausible live value, "
@@ -1722,6 +1741,7 @@ class StressTesterApp(ctk.CTk):
         self.phase_cards: dict[str, TestPhaseRow] = {}
         self.telemetry_labels: dict[str, ctk.CTkLabel] = {}
         self.telemetry_bars: dict[str, ctk.CTkProgressBar] = {}
+        self.telemetry_device_labels: dict[str, ctk.CTkLabel] = {}
         self.telemetry_sensor_choices: dict[str, dict[str, str | None]] = {}
         self.telemetry_selected_labels: dict[str, str] = {
             category.key: UNASSIGNED_SENSOR_OPTION for category in TELEMETRY_CATEGORIES
@@ -1965,6 +1985,7 @@ class StressTesterApp(ctk.CTk):
         self.dashboard_frame.destroy()
         self.telemetry_labels.clear()
         self.telemetry_bars.clear()
+        self.telemetry_device_labels.clear()
         self.configure(fg_color=BG)
         self._build_shell()
         self._load_presets_into_menu()
@@ -2049,34 +2070,16 @@ class StressTesterApp(ctk.CTk):
         self.phase_progress.set(0)
         self.phase_progress.grid(row=1, column=0, columnspan=2, sticky="ew", padx=28, pady=(0, 16))
 
-        # ---- Telemetry tiles
+        # ---- Telemetry: one card per device, each naming the hardware its sensors read
         telemetry_panel, telemetry_body = build_panel(frame, "Live telemetry")
         telemetry_panel.grid(row=2, column=0, sticky="nsew", padx=(28, 8), pady=(0, 16))
         telemetry_body.grid_columnconfigure((0, 1, 2), weight=1, uniform="telemetry")
-        tiles = [
-            ("cpu_temp", "CPU temperature"),
-            ("cpu_load", "CPU load"),
-            ("cpu_power", "CPU power"),
-            ("gpu_temp", "GPU temperature"),
-            ("gpu_load", "GPU load"),
-            ("gpu_power", "GPU power"),
-            ("ram_load", "RAM load"),
-            ("storage_load", "Storage load"),
-            ("total_power", "Total power"),
-        ]
-        for index, (key, label) in enumerate(tiles):
-            tile = ctk.CTkFrame(telemetry_body, fg_color=CARD, corner_radius=RADIUS)
-            row, column = divmod(index, 3)
-            tile.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
-            tile.grid_columnconfigure(0, weight=1)
-            ctk.CTkLabel(tile, text=label, font=ui_font(12), text_color=TEXT_MUTED, anchor="w", height=20).grid(row=0, column=0, sticky="w", padx=12, pady=(6, 0))
-            value_label = ctk.CTkLabel(tile, text="-", font=ui_font(18, "semibold"), text_color=TEXT, anchor="w", height=26)
-            value_label.grid(row=1, column=0, sticky="w", padx=12)
-            bar = ctk.CTkProgressBar(tile, height=4, corner_radius=2, fg_color=BORDER, progress_color=ACCENT)
-            bar.set(0)
-            bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 10))
-            self.telemetry_labels[key] = value_label
-            self.telemetry_bars[key] = bar
+        telemetry_body.grid_rowconfigure(1, weight=1)
+        for device, column, row, rowspan in (("cpu", 0, 0, 2), ("gpu", 1, 0, 2), ("ram", 2, 0, 1), ("storage", 2, 1, 1)):
+            title, metrics = TELEMETRY_CARDS[device]
+            card = self._build_telemetry_card(telemetry_body, device, title, metrics)
+            card.grid(row=row, column=column, rowspan=rowspan, sticky="nsew", padx=4, pady=4)
+        self._refresh_telemetry_device_names()
 
         # ---- Completed phases
         def logs_actions(panel_header: Any) -> None:
@@ -2131,6 +2134,54 @@ class StressTesterApp(ctk.CTk):
         self._set_dashboard_controls(session_running=False)
         self._refresh_completed_logs_ui()
 
+    def _build_telemetry_card(self, parent: Any, device: str, title: str, metrics: tuple[tuple[str, str, bool], ...]) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=RADIUS)
+        card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(card, text=display_case(title), font=ui_font(11, "semibold"), text_color=TEXT_FAINT, anchor="w", height=16).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)
+        )
+        device_label = ctk.CTkLabel(card, text="", font=ui_font(13, "semibold"), text_color=heading_color(), anchor="w", justify="left")
+        device_label.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12)
+        # Model names are long; wrap them to the card instead of letting them widen the column.
+        card.bind("<Configure>", lambda event: device_label.configure(wraplength=max(80, event.width - 24)), add="+")
+        self.telemetry_device_labels[device] = device_label
+        build_divider(card).grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 2))
+
+        row = 3
+        for key, label, has_bar in metrics:
+            ctk.CTkLabel(card, text=label, font=ui_font(12), text_color=TEXT_MUTED, anchor="w", height=22).grid(
+                row=row, column=0, sticky="w", padx=(12, 6), pady=(4, 0)
+            )
+            value_label = ctk.CTkLabel(card, text="-", font=ui_font(15, "semibold"), text_color=TEXT, anchor="e", height=22)
+            value_label.grid(row=row, column=1, sticky="e", padx=(0, 12), pady=(4, 0))
+            self.telemetry_labels[key] = value_label
+            if has_bar:
+                bar = ctk.CTkProgressBar(card, height=4, corner_radius=2, fg_color=BORDER, progress_color=ACCENT)
+                bar.set(0)
+                self.telemetry_bars[key] = bar
+            else:
+                bar = ctk.CTkFrame(card, height=4, fg_color="transparent")  # keeps the rows evenly spaced
+            bar.grid(row=row + 1, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 2))
+            row += 2
+        card.grid_rowconfigure(row, weight=1, minsize=8)
+        return card
+
+    def _refresh_telemetry_device_names(self) -> None:
+        """Name the hardware behind each card's assigned sensors, from the last sensor scan."""
+        if not self.telemetry_device_labels:
+            return
+        mappings = self.settings.get("telemetry_mappings", {}) or {}
+        hardware_by_sensor = {sensor.get("sensor_id"): sensor.get("hardware_name") for sensor in self.telemetry_inventory}
+        for device, (_title, metrics) in TELEMETRY_CARDS.items():
+            names = [hardware_by_sensor.get(mappings.get(key)) for key, _label, _has_bar in metrics if mappings.get(key)]
+            name = next((name for name in names if name), "")
+            if device == "cpu":
+                name = self.orchestrator.cpu_name or name
+            elif device == "ram":
+                name = f"{psutil.virtual_memory().total / 1024 ** 3:.0f} GB total"
+            label = self.telemetry_device_labels[device]
+            label.configure(text=name or "No sensor assigned", text_color=heading_color() if name else TEXT_FAINT)
+
     @staticmethod
     def _build_timer_tile(parent: Any, column: int, title: str) -> ctk.CTkLabel:
         tile = ctk.CTkFrame(
@@ -2180,6 +2231,7 @@ class StressTesterApp(ctk.CTk):
             and self.pawnio_status.get("is_running") is True
         )
         if confirmed and not pawnio_arrived:
+            self._assign_new_readings()
             return
         if install_started:
             return  # assign once the driver is up so the CPU sensors are included; the PawnIO watch opens the review
@@ -2199,6 +2251,18 @@ class StressTesterApp(ctk.CTk):
         keep = self.settings.get("telemetry_mappings") if keep_working else None
         self._save_telemetry_mappings(auto_assign_sensors(self.telemetry_inventory, keep=keep))
         return True
+
+    def _assign_new_readings(self) -> None:
+        """Give readings added by an app update a sensor automatically; approved ones are left as they are."""
+        new_keys = self.orchestrator.new_telemetry_readings
+        if not new_keys or not self.telemetry_inventory:
+            return
+        automatic = auto_assign_sensors(self.telemetry_inventory)
+        mappings = dict(self.settings.get("telemetry_mappings") or {})
+        for key in new_keys:
+            mappings[key] = mappings.get(key) or automatic.get(key)
+        self.orchestrator.new_telemetry_readings = []
+        self._save_telemetry_mappings(mappings)
 
     def _auto_assign_and_review(self, notice: str) -> None:
         # Readings the user picked earlier (approved, or changed in a review closed without
@@ -2596,6 +2660,7 @@ class StressTesterApp(ctk.CTk):
         self._apply_telemetry_state_to_ui()
 
     def _apply_telemetry_state_to_ui(self) -> None:
+        self._refresh_telemetry_device_names()
         if hasattr(self, "telemetry_header_status_label"):
             self.telemetry_header_status_label.configure(
                 text=self.telemetry_header_status_text,
@@ -3094,22 +3159,6 @@ class StressTesterApp(ctk.CTk):
         )
 
     def _update_telemetry(self, sample: dict[str, Any]) -> None:
-        if sample.get("cpu_power") is not None or sample.get("gpu_power") is not None:
-            sample["total_power"] = (sample.get("cpu_power") or 0.0) + (sample.get("gpu_power") or 0.0)
-        else:
-            sample["total_power"] = None
-
-        units = {
-            "cpu_temp": " °C",
-            "gpu_temp": " °C",
-            "cpu_load": " %",
-            "gpu_load": " %",
-            "ram_load": " %",
-            "storage_load": " %",
-            "cpu_power": " W",
-            "gpu_power": " W",
-            "total_power": " W",
-        }
         temperature_limits = {
             "cpu_temp": self.orchestrator.cpu_temp_limit_c,
             "gpu_temp": self.orchestrator.gpu_temp_limit_c,
@@ -3117,17 +3166,22 @@ class StressTesterApp(ctk.CTk):
         scales = {
             "cpu_power": 250.0,
             "gpu_power": 450.0,
-            "total_power": 700.0,
         }
         mappings = self.settings.get("telemetry_mappings", {})
-        for key, value in list(sample.items()):
+        for key, value in sample.items():
             if key not in self.telemetry_labels:
                 continue
             label = self.telemetry_labels[key]
-            bar = self.telemetry_bars[key]
+            bar = self.telemetry_bars.get(key)
             if value is None:
                 label.configure(text="No data" if mappings.get(key) else "Unassigned", text_color=TEXT_FAINT)
-                bar.set(0)
+                if bar is not None:
+                    bar.set(0)
+                continue
+            category = TELEMETRY_CATEGORY_MAP[key]
+            unit = SENSOR_READING_UNITS.get(category.sensor_type, "")
+            if category.sensor_type == "Clock":
+                label.configure(text=f"{value:.0f}{unit}", text_color=heading_color())
                 continue
             color = ACCENT
             if key in temperature_limits:
@@ -3137,9 +3191,10 @@ class StressTesterApp(ctk.CTk):
                 color = DANGER if value >= limit - 5 else WARNING if value >= limit - 15 else ACCENT
             else:
                 fraction = value / scales.get(key, 100.0)
-            label.configure(text=f"{value:.1f}{units.get(key, '')}", text_color=heading_color() if color == ACCENT else color)
-            bar.configure(progress_color=color)
-            bar.set(max(0.0, min(1.0, float(fraction))))
+            label.configure(text=f"{value:.1f}{unit}", text_color=heading_color() if color == ACCENT else color)
+            if bar is not None:
+                bar.configure(progress_color=color)
+                bar.set(max(0.0, min(1.0, float(fraction))))
 
     def _add_completed_log(self, meta: dict[str, Any]) -> None:
         log_file_path = str(meta.get("log_file_path", "") or "")

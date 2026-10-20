@@ -352,6 +352,8 @@ class StressOrchestrator:
         self.gpu_temp_limit_c = GPU_TEMP_LIMIT_C
         self.cpu_name = detect_cpu_name()
         self._phase_gpu_name = ""  # GPU FurMark renders on in the current phase, once its log reports it
+        # Readings the loaded settings.json had no entry for, i.e. added since the assignment was saved.
+        self.new_telemetry_readings: list[str] = []
 
         self.run_id = ""
         self.run_dir: Path | None = None
@@ -424,6 +426,7 @@ class StressOrchestrator:
 
         mappings = loaded.get("telemetry_mappings")
         if isinstance(mappings, dict):
+            self.new_telemetry_readings = [key for key in DEFAULT_TELEMETRY_MAPPINGS if key not in mappings]
             normalized_mappings = DEFAULT_TELEMETRY_MAPPINGS.copy()
             for key in normalized_mappings:
                 value = mappings.get(key)

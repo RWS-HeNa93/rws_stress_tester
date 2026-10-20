@@ -18,6 +18,7 @@ GPU_TEMP_LIMIT_C = 95.0
 SENSOR_TYPE_TEMPERATURE = "Temperature"
 SENSOR_TYPE_LOAD = "Load"
 SENSOR_TYPE_POWER = "Power"
+SENSOR_TYPE_CLOCK = "Clock"
 
 
 @dataclass(frozen=True)
@@ -45,15 +46,19 @@ class TelemetrySensor:
         return f"{hardware_label} | {self.sensor_name}"
 
 
+# Grouped by device: the sensor window lists them in this order.
 TELEMETRY_CATEGORIES: tuple[TelemetryCategory, ...] = (
     TelemetryCategory("cpu_temp", "CPU Temperature", SENSOR_TYPE_TEMPERATURE, ("cpu",), " C"),
-    TelemetryCategory("gpu_temp", "GPU Temperature", SENSOR_TYPE_TEMPERATURE, ("gpu",), " C"),
     TelemetryCategory("cpu_load", "CPU Load", SENSOR_TYPE_LOAD, ("cpu",), "%"),
+    TelemetryCategory("cpu_clock", "CPU Clock", SENSOR_TYPE_CLOCK, ("cpu",), " MHz"),
+    TelemetryCategory("cpu_power", "CPU Power", SENSOR_TYPE_POWER, ("cpu",), " W"),
+    TelemetryCategory("gpu_temp", "GPU Temperature", SENSOR_TYPE_TEMPERATURE, ("gpu",), " C"),
     TelemetryCategory("gpu_load", "GPU Load", SENSOR_TYPE_LOAD, ("gpu",), "%"),
+    TelemetryCategory("gpu_clock", "GPU Core Clock", SENSOR_TYPE_CLOCK, ("gpu",), " MHz"),
+    TelemetryCategory("vram_clock", "GPU Memory Clock", SENSOR_TYPE_CLOCK, ("gpu",), " MHz"),
+    TelemetryCategory("gpu_power", "GPU Power", SENSOR_TYPE_POWER, ("gpu",), " W"),
     TelemetryCategory("ram_load", "RAM Load", SENSOR_TYPE_LOAD, ("ram",), "%"),
     TelemetryCategory("storage_load", "Storage Load", SENSOR_TYPE_LOAD, ("storage",), "%"),
-    TelemetryCategory("gpu_power", "GPU Power", SENSOR_TYPE_POWER, ("gpu",), " W"),
-    TelemetryCategory("cpu_power", "CPU Power", SENSOR_TYPE_POWER, ("cpu",), " W"),
 )
 TELEMETRY_CATEGORY_MAP = {category.key: category for category in TELEMETRY_CATEGORIES}
 DEFAULT_TELEMETRY_MAPPINGS = {category.key: None for category in TELEMETRY_CATEGORIES}
@@ -67,7 +72,11 @@ AUTO_ASSIGN_SENSOR_NAMES: dict[str, tuple[str, ...]] = {
     ),
     "gpu_temp": ("GPU Core", "GPU Hot Spot"),
     "cpu_load": ("CPU Total",),
+    # Per-core clocks are a fallback for CPUs without the average sensor.
+    "cpu_clock": ("Cores (Average)", "Cores (Average Effective)", "CPU Core #1", "P-Core #1", "Core #1", "CPU Core"),
     "gpu_load": ("GPU Core", "GPU Render/Compute", "D3D 3D"),
+    "gpu_clock": ("GPU Core", "GPU Shader"),
+    "vram_clock": ("GPU Memory",),
     "ram_load": ("Memory",),
     "storage_load": ("Total Activity",),
     "gpu_power": ("GPU Package", "GPU Power", "GPU PPT", "GPU Total", "GPU Core"),
@@ -92,6 +101,9 @@ class TelemetrySample:
     storage_load: float | None = None
     gpu_power: float | None = None
     cpu_power: float | None = None
+    cpu_clock: float | None = None
+    gpu_clock: float | None = None
+    vram_clock: float | None = None
     timestamp: float = field(default_factory=time.time)
 
 
@@ -226,16 +238,7 @@ class TelemetryMonitor:
                     continue
                 values[category.key] = sensor.value
 
-            return TelemetrySample(
-                cpu_temp=values["cpu_temp"],
-                gpu_temp=values["gpu_temp"],
-                cpu_load=values["cpu_load"],
-                gpu_load=values["gpu_load"],
-                ram_load=values["ram_load"],
-                storage_load=values["storage_load"],
-                gpu_power=values["gpu_power"],
-                cpu_power=values["cpu_power"],
-            )
+            return TelemetrySample(**values)
 
     def run_polling_loop(
         self,
@@ -563,6 +566,8 @@ def _has_live_value(sensor: Mapping[str, Any], category: TelemetryCategory) -> b
     if category.sensor_type == SENSOR_TYPE_TEMPERATURE:
         low, high = PLAUSIBLE_TEMPERATURE_C
         return low <= value <= high
+    if category.sensor_type == SENSOR_TYPE_CLOCK:
+        return value > 0  # clocks read 0 when the driver needed to read them is missing
     return True
 
 

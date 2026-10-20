@@ -6,7 +6,7 @@ while they run, and produces a PDF System Stability Certificate. It controls the
 - y-cruncher        CPU, RAM and PSU load (checks its own results)
 - FurMark           GPU and video memory (VRAM) load, with an artifact scanner
 - DiskSpd           storage load
-- LibreHardwareMonitor   temperature, load and power readings
+- LibreHardwareMonitor   temperature, load, clock and power readings
 
 If every selected test passes, the verdict is CERTIFIED STABLE, whatever the test durations.
 Choosing sensible durations is up to the technician.
@@ -141,8 +141,9 @@ Setup screen
   - Start diagnostics.
 
 Assign Sensors
-  Links the hardware sensors found on this PC to the app's readings: CPU and GPU temperature,
-  CPU and GPU load, RAM load, storage load, CPU and GPU power. Saved in settings.json.
+  Links the hardware sensors found on this PC to the app's readings: CPU temperature, load,
+  clock and power; GPU temperature, load, core clock, memory clock and power; RAM load;
+  storage load. Saved in settings.json.
   - Each reading shows the value its sensor read at the last scan.
   - Refresh sensors re-scans the hardware.
   - Auto-assign picks a sensor for every reading again (discrete GPU before integrated,
@@ -151,7 +152,8 @@ Assign Sensors
     it is running, re-scans the sensors and asks you to review the assignment again.
   - Until an assignment is approved, it is made automatically and shown for review at every
     launch. It is also shown once more on the first launch with PawnIO running if the last
-    approval was made without it.
+    approval was made without it. Readings added by an app update are assigned automatically;
+    approved ones are kept.
   - The app warns when assignments are missing, invalid or return no live data.
 
 Thermal Settings
@@ -161,7 +163,11 @@ Thermal Settings
 Dashboard (after Start diagnostics)
   - Current phase, issue indicator, time left in the phase and in the whole run, and a
     progress bar for the phase.
-  - Live telemetry: CPU/GPU temperature and load, RAM load, storage load, CPU/GPU/total power.
+  - Live telemetry, one card per device, each naming the hardware its sensors read:
+      CPU      temperature, load, clock, power
+      GPU      temperature, load, core clock, memory clock, power
+      RAM      total load
+      Storage  activity
     Temperature bars turn amber within 15 C of the thermal limit and red within 5 C.
   - Live console with the engines' output; problems are highlighted.
   - Completed phases: click a finished phase to see its status, exit code, run time,
