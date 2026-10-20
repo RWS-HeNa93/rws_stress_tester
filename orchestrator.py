@@ -79,9 +79,11 @@ YCRUNCHER_SCHEDULES: dict[str, tuple[str, ...]] = {
     # NTT63      larger working set, vector integer
     # Switching between tests also produces load transients that expose weak voltage regulation.
     "cpu": ("SFTv4", "BKT", "VT3", "SNT", "SVT", "NTT63"),
-    # Memory/IMC stability: FFTv4 is the most memory-bound test and the most sensitive to unstable
-    # RAM timings, memory-controller and fabric settings; VT3 and NTT63 add other access patterns.
-    "ram": ("FFTv4", "VT3", "NTT63"),
+    # Memory/IMC stability: VT3 comes first because it fills the whole -M allocation, so even a short
+    # phase reaches every gigabyte under test. FFTv4 is the most sensitive to unstable RAM timings,
+    # memory-controller and fabric settings, but floating-point precision caps its working set at a
+    # few GB whatever -M is (about 2 GB measured with -M:11571m); NTT63 adds another access pattern.
+    "ram": ("VT3", "FFTv4", "NTT63"),
     # Maximum sustained CPU power alongside FurMark: in-cache tests only, no memory stalls.
     "psu": ("SFTv4", "SNT", "SVT"),
 }

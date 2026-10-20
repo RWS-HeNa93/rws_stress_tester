@@ -75,7 +75,8 @@ Short tests run fewer y-cruncher tests
   Each y-cruncher test needs a minimum time to be useful: CPU and PSU 1 minute, RAM 2 minutes.
   Short phases keep only the most valuable tests that fit:
     CPU: 1 min = SFTv4 only, 6 min or more = all six
-    RAM: under 4 min = FFTv4 only, 6 min or more = all three
+    RAM: under 4 min = VT3 only (it uses all the memory chosen), 4-5 min = VT3 and FFTv4,
+         6 min or more = all three
   The time is shared evenly between the chosen tests (at most 5 minutes each, then they repeat).
 
 End of a phase
