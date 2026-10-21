@@ -27,6 +27,7 @@ from orchestrator import (
     EVENT_STATUS,
     EVENT_TELEMETRY,
     EVENT_PHASE_LOGS,
+    EVENT_WARNING,
     FURMARK_VRAM_TEST_SIZES_GB,
     RAM_FILL_PERCENT,
     RAM_FILL_PERCENT_RANGE,
@@ -35,6 +36,7 @@ from orchestrator import (
     RAM_TEST_MIN_GB,
     STDERR_PREFIX,
     StressOrchestrator,
+    WARNING_NOTE_PREFIX,
     VRAM_HEADROOM_GB,
     detect_vram_gb,
     is_error_line,
@@ -1336,8 +1338,21 @@ class LogViewerModal(ctk.CTkToplevel):
                 justify="left",
                 wraplength=900,
             ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        if label_warnings := [str(warning) for warning in meta.get("phase_warnings") or []]:
+            warnings_text = "\n".join(f"• {warning}" for warning in label_warnings[:4])
+            if len(label_warnings) > 4:
+                warnings_text += f"\n• ... and {len(label_warnings) - 4} more (see the end of the log)"
+            ctk.CTkLabel(
+                details_body,
+                text=f"Worth checking (did not fail the test):\n{warnings_text}",
+                font=ui_font(12),
+                text_color=WARNING,
+                anchor="w",
+                justify="left",
+                wraplength=900,
+            ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ctk.CTkLabel(details_body, text="COMMAND", font=ui_font(10, "semibold"), text_color=TEXT_FAINT, anchor="w").grid(
-            row=3, column=0, columnspan=3, sticky="w"
+            row=4, column=0, columnspan=3, sticky="w"
         )
         ctk.CTkLabel(
             details_body,
@@ -1347,7 +1362,7 @@ class LogViewerModal(ctk.CTkToplevel):
             justify="left",
             anchor="w",
             wraplength=900,
-        ).grid(row=4, column=0, columnspan=3, sticky="w")
+        ).grid(row=5, column=0, columnspan=3, sticky="w")
 
         self.textbox = ctk.CTkTextbox(
             self,
@@ -1362,6 +1377,7 @@ class LogViewerModal(ctk.CTkToplevel):
         )
         self.textbox.grid(row=2, column=0, sticky="nsew", padx=24, pady=12)
         self.textbox.tag_config("error", foreground=DANGER)
+        self.textbox.tag_config("warning", foreground=WARNING)
         self.textbox.tag_config("note", foreground=TEXT_FAINT)
         self._load_log()
 
@@ -1436,17 +1452,20 @@ class LogViewerModal(ctk.CTkToplevel):
 
         # Group consecutive lines with the same tag so the textbox gets few large inserts.
         chunk: list[str] = []
-        chunk_is_error = False
+        chunk_tag: str | None = None
         for line in content_lines:
             text = line[len(STDERR_PREFIX):] if line.startswith(STDERR_PREFIX) else line
-            line_is_error = is_error_line(text, test_key)
-            if chunk and line_is_error != chunk_is_error:
-                self.textbox.insert("end", "".join(chunk), "error" if chunk_is_error else None)
+            if text.startswith(WARNING_NOTE_PREFIX):
+                line_tag = "warning"
+            else:
+                line_tag = "error" if is_error_line(text, test_key) else None
+            if chunk and line_tag != chunk_tag:
+                self.textbox.insert("end", "".join(chunk), chunk_tag)
                 chunk = []
-            chunk_is_error = line_is_error
+            chunk_tag = line_tag
             chunk.append(line)
         if chunk:
-            self.textbox.insert("end", "".join(chunk), "error" if chunk_is_error else None)
+            self.textbox.insert("end", "".join(chunk), chunk_tag)
 
         self.textbox.configure(state="disabled")
 
@@ -1956,8 +1975,30 @@ class StressTesterApp(ctk.CTk):
         self.certificate_machine_name_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=4)
         self._sync_certificate_field_states()
 
+        event_log_panel, event_log_body = build_panel(side, "Windows event log")
+        event_log_panel.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        event_log_body.grid_columnconfigure(0, weight=1)
+        if not hasattr(self, "event_log_warnings_var"):
+            self.event_log_warnings_var = ctk.BooleanVar(value=bool(self.settings.get("event_log_warnings", True)))
+        build_checkbox(
+            event_log_body, "Show warnings worth checking", self.event_log_warnings_var, command=self._save_event_log_setting
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            event_log_body,
+            text=(
+                "Corrected hardware errors, driver and storage events are shown in yellow in the console and "
+                "logs. They are not failures and do not affect the result or the certificate. Uncorrected "
+                "hardware errors and GPU driver resets always fail the test."
+            ),
+            font=ui_font(12),
+            text_color=TEXT_MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+
         start_panel, start_body = build_panel(side)
-        start_panel.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        start_panel.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         start_body.grid_columnconfigure(0, weight=1)
         self.start_summary_label = ctk.CTkLabel(start_body, text="", font=ui_font(13), text_color=TEXT_MUTED, anchor="w", justify="left")
         self.start_summary_label.grid(row=0, column=0, sticky="w", pady=(0, 12))
@@ -2073,6 +2114,8 @@ class StressTesterApp(ctk.CTk):
         self.tested_hardware_label.grid(row=2, column=0, columnspan=2, sticky="w")
         self.error_flag_label = ctk.CTkLabel(status, text="", font=ui_font(12, "semibold"), text_color=DANGER, anchor="w")
         self.error_flag_label.grid(row=3, column=0, sticky="w", padx=(0, 10))
+        self.warning_flag_label = ctk.CTkLabel(status, text="", font=ui_font(12, "semibold"), text_color=WARNING, anchor="w")
+        self.warning_flag_label.grid(row=4, column=0, columnspan=2, sticky="w")
         self.phase_status_label = ctk.CTkLabel(status, text="", font=ui_font(12), text_color=TEXT_MUTED, anchor="w", justify="left")
         self.phase_status_label.grid(row=3, column=1, sticky="w")
 
@@ -2136,6 +2179,7 @@ class StressTesterApp(ctk.CTk):
             scrollbar_button_color=BORDER_STRONG,
         )
         self.console.tag_config("error", foreground=DANGER)
+        self.console.tag_config("warning", foreground=WARNING)
         self.console.grid(row=0, column=0, sticky="nsew")
 
         # ---- Footer actions
@@ -2735,7 +2779,7 @@ class StressTesterApp(ctk.CTk):
         return dialog.show()
 
     def _show_crash_recovery_if_needed(self) -> None:
-        crash_state = self.orchestrator.check_crash_recovery()
+        crash_state = self.orchestrator.check_crash_recovery(bool(self.settings.get("event_log_warnings", True)))
         if not crash_state:
             return
         test_key = str(crash_state.get("current_test", "") or "")
@@ -2746,11 +2790,14 @@ class StressTesterApp(ctk.CTk):
             f"Test marked FAILED (System Crash): {failed_test}\n"
             f"Run: {run_id}"
         )
-        windows_events = crash_state.get("windows_events") or []
-        if windows_events:
-            shown = "\n".join(f"- {line}" for line in windows_events[:5])
-            more = f"\n(and {len(windows_events) - 5} more in the run summary)" if len(windows_events) > 5 else ""
-            message += f"\n\nWindows recorded since the run started:\n{shown}{more}"
+        for heading, lines in (
+            ("Windows recorded since the phase started:", crash_state.get("windows_events") or []),
+            ("Also logged, worth checking (not by itself a sign of failure):", crash_state.get("windows_warnings") or []),
+        ):
+            if lines:
+                shown = "\n".join(f"- {line}" for line in lines[:5])
+                more = f"\n(and {len(lines) - 5} more in the run summary)" if len(lines) > 5 else ""
+                message += f"\n\n{heading}\n{shown}{more}"
         if crash_state.get("summary_path"):
             message += f"\n\nReconstructed run summary:\n{crash_state['summary_path']}"
         self._show_warning("Crash Recovery", message)
@@ -2772,6 +2819,13 @@ class StressTesterApp(ctk.CTk):
         file_path = dialog.show()
         if file_path:
             self.logo_var.set(file_path)
+
+    def _save_event_log_setting(self) -> None:
+        self.settings["event_log_warnings"] = bool(self.event_log_warnings_var.get())
+        try:
+            self.orchestrator.save_settings(self.settings)
+        except OSError as exc:
+            self._show_warning("Settings Not Saved", f"Unable to save settings.json:\n{exc}")
 
     def _sync_certificate_field_states(self) -> None:
         customer_state = "normal" if self.include_customer_name_var.get() else "disabled"
@@ -3084,6 +3138,7 @@ class StressTesterApp(ctk.CTk):
         self.console.configure(state="disabled")
         
         self.error_flag_label.configure(text="")
+        self.warning_flag_label.configure(text="")
         self.phase_status_label.configure(text="")
         self.tested_hardware_label.configure(text="")
         self.phase_index_label.configure(text="STARTING")
@@ -3136,6 +3191,10 @@ class StressTesterApp(ctk.CTk):
             if hasattr(self, "error_flag_label"):
                 self.error_flag_label.configure(text="●  Issues detected")
             self._append_console(f"[ALERT] {event['message']}", is_error=True)
+        elif event_type == EVENT_WARNING:
+            if hasattr(self, "warning_flag_label"):
+                self.warning_flag_label.configure(text="●  Windows event log warnings worth checking")
+            self._append_console(f"[WARNING] {event['message']}", is_warning=True)
         elif event_type == EVENT_STATUS:
             self._append_console(f"[STATUS] {event['message']}")
         elif event_type == EVENT_PHASE_LOGS:
@@ -3146,13 +3205,11 @@ class StressTesterApp(ctk.CTk):
         elif event_type == EVENT_ABORTED:
             self._handle_aborted(event["message"])
 
-    def _append_console(self, line: str, is_error: bool = False) -> None:
+    def _append_console(self, line: str, is_error: bool = False, is_warning: bool = False) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.console.configure(state="normal")
-        if is_error:
-            self.console.insert("end", f"[{timestamp}] {line}\n", "error")
-        else:
-            self.console.insert("end", f"[{timestamp}] {line}\n")
+        tag = "error" if is_error else "warning" if is_warning else None
+        self.console.insert("end", f"[{timestamp}] {line}\n", tag)
         line_count = int(self.console.index("end-1c").split(".")[0])
         if line_count > CONSOLE_MAX_LINES:
             self.console.delete("1.0", f"{line_count - CONSOLE_MAX_LINES + 1}.0")
@@ -3327,6 +3384,11 @@ class StressTesterApp(ctk.CTk):
         report_path = summary.get("report_path", "")
         report_error = summary.get("report_error", "")
         message = verdict
+        if warnings := summary.get("warnings") or []:
+            message += (
+                f"\n\nWindows logged {len(warnings)} event(s) worth checking. They did not affect the result "
+                "and are not on the certificate; see the yellow lines in the console and phase logs."
+            )
         if report_path:
             message += f"\n\nReport saved to:\n{report_path}"
         elif report_error:

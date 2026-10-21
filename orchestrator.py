@@ -11,14 +11,20 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import psutil
 
-from eventlog import HardwareEvent, HardwareEventWatcher, EventLogUnavailable, query_hardware_events
+from eventlog import (
+    HardwareEvent,
+    HardwareEventWatcher,
+    EventLogUnavailable,
+    latest_record_id,
+    query_hardware_events,
+)
 from report_gen import build_stability_report
 from telemetry import (
     CPU_TEMP_LIMIT_C,
@@ -115,6 +121,8 @@ DISKSPD_FREE_SPACE_FRACTION = 0.2
 THERMAL_ABORT_MESSAGE = "Thermal Failure - Aborted"
 CRASH_STATUS = "FAILED (System Crash)"
 STDERR_PREFIX = "[STDERR] "
+# Log lines for things worth checking that do not fail the test, shown in yellow.
+WARNING_NOTE_PREFIX = "[APP] WARNING: "
 
 # y-cruncher -D is the per-algorithm duration; -TL bounds the whole stress run.
 YCRUNCHER_PER_TEST_SECONDS = 300
@@ -179,6 +187,7 @@ EVENT_PHASE = "phase"
 EVENT_FINISHED = "finished"
 EVENT_ABORTED = "aborted"
 EVENT_ALERT = "alert"
+EVENT_WARNING = "warning"
 EVENT_PHASE_LOGS = "phase_logs"
 
 
@@ -331,6 +340,8 @@ class SessionSummary:
     started_at: str = ""
     machine_name: str = ""
     event_log_monitored: bool = False
+    # Windows event log findings worth checking; they do not affect the verdict or the certificate.
+    warnings: list[str] = field(default_factory=list)
 
 
 class StressOrchestrator:
@@ -357,6 +368,8 @@ class StressOrchestrator:
         self.test_results: list[dict[str, Any]] = []
         self.issues: list[str] = []           # session-wide issues (crash recovery, telemetry, etc)
         self._phase_issues: list[str] = []    # per-test issues, reset before each phase
+        self.warnings: list[str] = []         # worth checking, never fail a test
+        self._phase_warnings: list[str] = []
         self.max_cpu_temp = 0.0
         self.max_gpu_temp = 0.0
         self.max_ram_load = 0.0
@@ -381,10 +394,10 @@ class StressOrchestrator:
         self.logs_dir: Path | None = None
         self.started_at: datetime | None = None
         self.generate_report = True
-        # Windows event log watching: each phase covers the time since the previous phase's last check,
-        # and every event is reported once per session.
-        self._event_watermark: datetime | None = None
-        self._seen_event_ids: set[int] = set()
+        # Windows event log watching: each phase picks up after the last event the previous phase read,
+        # so every event is reported once per session.
+        self._event_record_id: int | None = None
+        self.report_event_log_warnings = True
         self._event_log_unavailable_reported = False
 
     def load_json(self, path: Path, default: Any) -> Any:
@@ -429,6 +442,7 @@ class StressOrchestrator:
             "sensors_reviewed_with_pawnio": True,
             "cpu_temp_limit_c": CPU_TEMP_LIMIT_C,
             "gpu_temp_limit_c": GPU_TEMP_LIMIT_C,
+            "event_log_warnings": True,
             "ui_theme": "",  # empty = the UI's default skin
         }
         loaded = self.load_json(self.settings_path, defaults)
@@ -443,6 +457,7 @@ class StressOrchestrator:
         settings["certificate_machine_name"] = str(loaded.get("certificate_machine_name", "") or "")
         settings["cpu_temp_limit_c"] = self._normalize_temperature_limit(loaded.get("cpu_temp_limit_c"), CPU_TEMP_LIMIT_C)
         settings["gpu_temp_limit_c"] = self._normalize_temperature_limit(loaded.get("gpu_temp_limit_c"), GPU_TEMP_LIMIT_C)
+        settings["event_log_warnings"] = bool(loaded.get("event_log_warnings", True))
         settings["ui_theme"] = str(loaded.get("ui_theme", "") or "")
 
         mappings = loaded.get("telemetry_mappings")
@@ -518,7 +533,7 @@ class StressOrchestrator:
         """Rebuild the sensor session, e.g. so a freshly installed PawnIO driver is used."""
         self.telemetry.reopen()
 
-    def check_crash_recovery(self) -> dict[str, Any] | None:
+    def check_crash_recovery(self, report_warnings: bool = True) -> dict[str, Any] | None:
         if not self.state_path.exists():
             return None
         payload = self.load_json(self.state_path, None)
@@ -530,21 +545,31 @@ class StressOrchestrator:
             # means the machine went down while it was being written.
             payload = {"status": "running", "current_test": "", "run_id": ""}
 
-        payload["windows_events"] = self._crash_windows_events(str(payload.get("run_id", "") or ""))
+        failures, warnings = self._crash_windows_events(payload)
+        payload["windows_events"] = failures
+        payload["windows_warnings"] = warnings if report_warnings else []
         payload["summary_path"] = self._reconstruct_crashed_run(payload)
         self.clear_state_file()
         return payload
 
     @staticmethod
-    def _crash_windows_events(run_id: str) -> list[str]:
-        """What Windows logged since the crashed run started: hardware errors, blue screens, power loss."""
-        if not RUN_ID_PATTERN.match(run_id):
-            return []
+    def _crash_windows_events(state: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """What Windows logged since the crashed phase started, as (failures, warnings worth checking):
+        blue screens, power loss and uncorrected hardware errors first, then milder events."""
+        record_id = state.get("event_record_id")
+        if not isinstance(record_id, int) or isinstance(record_id, bool):
+            return [], []
         try:
-            events = query_hardware_events(datetime.strptime(run_id, "%Y%m%d_%H%M%S"))
-        except (EventLogUnavailable, ValueError):
-            return []
-        return [event.describe() for event in events]
+            events = query_hardware_events(record_id, include_after_restart=True).events
+        except EventLogUnavailable:
+            return [], []
+        gpu_under_load = str(state.get("current_test", "") or "") in FURMARK_TEST_KEYS
+        failures: list[str] = []
+        warnings: list[str] = []
+        for event in events:
+            failure = event.is_failure(gpu_under_load)
+            (failures if failure else warnings).append(event.describe(failure))
+        return failures, warnings
 
     def _reconstruct_crashed_run(self, state: dict[str, Any]) -> str:
         run_id = str(state.get("run_id", "") or "")
@@ -590,12 +615,15 @@ class StressOrchestrator:
         )
 
         windows_events = [str(line) for line in state.get("windows_events") or []]
+        windows_warnings = [str(line) for line in state.get("windows_warnings") or []]
         if crashed_log is not None:
             try:
                 with open(crashed_log, "a", encoding="utf-8") as handle:
                     handle.write(f"[APP] {crash_note}\n")
                     for line in windows_events:
                         handle.write(f"[APP] {line}\n")
+                    for line in windows_warnings:
+                        handle.write(f"{WARNING_NOTE_PREFIX}{line}\n")
             except OSError:
                 pass
 
@@ -613,6 +641,7 @@ class StressOrchestrator:
                     "clean_run": False,
                     "crash_recovered": True,
                     "issues": [crash_note, *windows_events],
+                    "warnings": windows_warnings,
                     "tests": tests,
                 },
             )
@@ -642,15 +671,20 @@ class StressOrchestrator:
         self.logs_dir = self.run_dir / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.started_at = datetime.now()
-        self._event_watermark = self.started_at
-        self._seen_event_ids = set()
+        self.report_event_log_warnings = bool(settings.get("event_log_warnings", True))
         self._event_log_unavailable_reported = False
+        try:
+            self._event_record_id = latest_record_id()
+        except EventLogUnavailable:
+            self._event_record_id = None  # the first phase tries again and reports it
 
         self.stop_event.clear()
         self.manual_abort = False
         with self._state_lock:
             self.issues = []
             self._phase_issues = []
+            self.warnings = []
+            self._phase_warnings = []
             self.max_cpu_temp = 0.0
             self.max_gpu_temp = 0.0
             self.max_ram_load = 0.0
@@ -745,6 +779,7 @@ class StressOrchestrator:
         status = "PASSED"
         with self._state_lock:
             self._phase_issues = []  # reset per-test issues — do NOT inherit from prior phases
+            self._phase_warnings = []
             self._phase_max = self._empty_phase_max()
         self._phase_gpu_name = ""
         self._write_state_file(test.key)
@@ -838,14 +873,21 @@ class StressOrchestrator:
                     )
                 time.sleep(1)
 
-            self._stop_event_watcher(event_watcher)
-            if event_watcher.suppressed and not self.manual_abort:
-                self._flag_phase_issue(
-                    f"{test.label}: Windows logged {event_watcher.suppressed} more hardware/driver event(s) "
-                    "not listed here; see Event Viewer > Windows Logs > System.",
-                    app_notes,
-                )
-            event_watcher = None
+            if event_watcher is not None:
+                self._stop_event_watcher(event_watcher)
+                if event_watcher.suppressed_failures and not self.manual_abort:
+                    self._flag_phase_issue(
+                        f"{test.label}: Windows logged {event_watcher.suppressed_failures} more hardware error(s) "
+                        "or driver reset(s) not listed here; see Event Viewer > Windows Logs > System.",
+                        app_notes,
+                    )
+                if event_watcher.suppressed_warnings and not self.manual_abort:
+                    self._flag_phase_warning(
+                        f"{test.label}: Windows logged {event_watcher.suppressed_warnings} more event(s) worth "
+                        "checking not listed here; see Event Viewer > Windows Logs > System.",
+                        app_notes,
+                    )
+                event_watcher = None
 
             for process in processes:
                 collected_exit_codes.append(process.poll())
@@ -915,6 +957,7 @@ class StressOrchestrator:
 
         with self._state_lock:
             phase_issues = self._phase_issues[:]
+            phase_warnings = self._phase_warnings[:]
             phase_max = dict(self._phase_max)
 
         if not commands:
@@ -940,6 +983,7 @@ class StressOrchestrator:
             "selected_vram_gb": test.vram_gb if test.key == "vram" else 0,
             "tested_hardware": dict(self._tested_hardware(test)),
             "phase_issues": phase_issues,
+            "phase_warnings": phase_warnings,
         }
 
         try:
@@ -993,10 +1037,14 @@ class StressOrchestrator:
                 return match.group(1).split("/")[0].strip()
         return ""
 
-    def _start_event_watcher(self, test: TestDefinition, app_notes: list[str]) -> HardwareEventWatcher:
-        def on_event(event: HardwareEvent) -> None:
-            if not self.manual_abort:
-                self._flag_phase_issue(f"{test.label}: {event.describe()}", app_notes)
+    def _start_event_watcher(self, test: TestDefinition, app_notes: list[str]) -> HardwareEventWatcher | None:
+        def on_event(event: HardwareEvent, failure: bool) -> None:
+            if self.manual_abort:
+                return
+            if failure:
+                self._flag_phase_issue(f"{test.label}: {event.describe(failure)}", app_notes)
+            else:
+                self._flag_phase_warning(f"{test.label}: {event.describe(failure)}", app_notes)
 
         def on_unavailable(reason: str) -> None:
             if self._event_log_unavailable_reported:
@@ -1006,11 +1054,18 @@ class StressOrchestrator:
             app_notes.append(f"[APP] {message}")
             self._emit(EVENT_STATUS, message=message)
 
+        if self._event_record_id is None:
+            try:
+                self._event_record_id = latest_record_id()
+            except EventLogUnavailable as exc:
+                on_unavailable(str(exc))
+                return None
         watcher = HardwareEventWatcher(
-            since=self._event_watermark or datetime.now(),
+            after_record_id=self._event_record_id,
             on_event=on_event,
             on_unavailable=on_unavailable,
-            seen_record_ids=self._seen_event_ids,
+            gpu_under_load=test.key in FURMARK_TEST_KEYS,
+            report_warnings=self.report_event_log_warnings,
             query=query_hardware_events,
         )
         watcher.start()
@@ -1018,14 +1073,21 @@ class StressOrchestrator:
 
     def _stop_event_watcher(self, watcher: HardwareEventWatcher) -> None:
         # The next phase picks up from here, so events between phases are not missed.
-        checked_at = datetime.now()
         watcher.stop()
-        self._event_watermark = checked_at
+        self._event_record_id = watcher.after_record_id
 
     def _flag_phase_issue(self, message: str, app_notes: list[str]) -> None:
         self._record_issue(message)
         app_notes.append(f"[APP] {message}")
         self._emit(EVENT_ALERT, message=message)
+
+    def _flag_phase_warning(self, message: str, app_notes: list[str]) -> None:
+        """Something worth checking that does not fail the test or reach the certificate."""
+        with self._state_lock:
+            self.warnings.append(message)
+            self._phase_warnings.append(message)
+        app_notes.append(f"{WARNING_NOTE_PREFIX}{message}")
+        self._emit(EVENT_WARNING, message=message)
 
     def _record_issue(self, message: str, phase: bool = True) -> None:
         with self._state_lock:
@@ -1224,6 +1286,7 @@ class StressOrchestrator:
 
         with self._state_lock:
             issues = self.issues[:]
+            warnings = self.warnings[:]
             maxima = {
                 "max_cpu_temp": self.max_cpu_temp,
                 "max_gpu_temp": self.max_gpu_temp,
@@ -1256,6 +1319,7 @@ class StressOrchestrator:
             clean_run=clean_run,
             verdict=verdict,
             event_log_monitored=os.name == "nt" and not self._event_log_unavailable_reported,
+            warnings=warnings,
             **maxima,
         )
 
@@ -1551,7 +1615,16 @@ class StressOrchestrator:
             pass
 
     def _write_state_file(self, current_test: str) -> None:
-        self.save_json(self.state_path, {"status": "running", "current_test": current_test, "run_id": self.run_id})
+        self.save_json(
+            self.state_path,
+            {
+                "status": "running",
+                "current_test": current_test,
+                "run_id": self.run_id,
+                # Crash recovery lists the Windows events logged after this one.
+                "event_record_id": self._event_record_id,
+            },
+        )
 
     def _emit(self, event_type: str, **payload: Any) -> None:
         self.event_queue.put({"type": event_type, **payload})

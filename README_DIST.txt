@@ -105,14 +105,12 @@ phase log and listed on the certificate.
                                                voltages, cooling
   FurMark artifact found                       GPU core (gpu/psu) or video memory (vram):
                                                overclock, cooling, failing card
-  WHEA hardware error in the event log         CPU, RAM or PCIe instability, even if corrected
-                                               by the hardware. Often the first sign of an
-                                               unstable overclock, undervolt or XMP/EXPO
-  Display driver reset (TDR) or NVIDIA/AMD     GPU instability, power delivery, driver
-  driver error
-  Disk / NVMe / SATA error, reset or retry,    Drive, cable, controller or failing media
-  or a single I/O taking 10 s or longer
-  File system error                            Drive or storage controller
+  Uncorrected WHEA hardware error in the       CPU, RAM or PCIe instability: overclock,
+  event log                                    undervolt, XMP/EXPO, but also drivers or BIOS
+                                               settings
+  Display driver reset (TDR) during a GPU,     GPU instability, power delivery, but also the
+  VRAM or PSU phase                            graphics driver
+  A single storage I/O taking 10 s or longer   Drive, cable, controller or failing media
   An engine crashes or quits early             The message gives the exit code in plain words;
                                                crashes under load usually mean instability
   Temperature above the thermal limit          Cooling. The run stops (THERMAL_ABORT)
@@ -121,15 +119,32 @@ phase log and listed on the certificate.
 
 Event log monitoring
   During every phase the app checks the Windows System event log every 30 seconds and at the
-  end of the phase. Each event is reported once. If a machine logs the same error constantly,
-  the first 10 per phase are listed with a count of the rest; see Event Viewer > Windows Logs >
-  System for all of them. If the event log cannot be read, the run continues and the log says
-  so, and the certificate does not claim the event log was monitored.
+  end of the phase. Each event is reported once, and only events logged after the run started
+  count, even if the PC clock is wrong or changes. If the event log cannot be read, the run
+  continues and the log says so, and the certificate does not claim the event log was
+  monitored.
+
+  What Windows logs falls into two groups:
+  - Failures (red): an uncorrected WHEA hardware error, or a display driver reset (TDR) while
+    the phase loads the GPU. These fail the phase and are listed on the certificate. They show
+    the system was unstable, which can come from the hardware or from software such as
+    drivers or BIOS settings.
+  - Warnings worth checking (yellow): corrected WHEA errors, a TDR outside a GPU phase,
+    NVIDIA/AMD driver errors, disk / NVMe / SATA errors, resets or retries, and file system
+    errors. They are shown in yellow in the console and the phase log and saved under
+    "warnings" in run_summary.json. They do not fail the phase, change the verdict or appear
+    on the certificate: they are not evidence of a failure, only something the technician
+    may want to look into, e.g. a misconfigured BIOS power setting or a flaky USB drive.
+    Switch them off with "Show warnings worth checking" on the setup screen; failures are
+    always checked.
+  If a machine logs the same event constantly, the first 10 failures and 10 warnings per phase
+  are listed with a count of the rest; see Event Viewer > Windows Logs > System for all of them.
 
 After a crash or power loss
   On the next launch the app marks the interrupted phase FAILED (System Crash) and shows what
-  Windows recorded since the run started: blue screen code, unexpected power loss, WHEA errors.
-  A reconstructed run_summary.json is saved in that run's folder.
+  Windows recorded since that phase started: blue screen code, unexpected power loss,
+  uncorrected WHEA errors, followed by any warnings worth checking. A reconstructed
+  run_summary.json is saved in that run's folder.
 
 
 SCREENS AND WINDOWS
@@ -144,6 +159,8 @@ Setup screen
     (Load), Delete it, or Reset to defaults. Presets are saved in presets.json.
   - Certificate: create a PDF certificate when the run ends, logo (from Logotypes\),
     optional customer name and machine name.
+  - Windows event log: "Show warnings worth checking" turns the yellow event log warnings on
+    or off (see Event log monitoring). Saved in settings.json.
   - Start diagnostics.
 
 Assign Sensors
@@ -192,7 +209,8 @@ Folder layout
   LICENSE.txt         license for RWS Stress Tester's own code (MIT)
   THIRD_PARTY_NOTICES.md   licenses of the bundled tools and libraries
   licenses\           third-party license texts
-  settings.json       logo, certificate details, sensor assignments, thermal limits, skin
+  settings.json       logo, certificate details, sensor assignments, thermal limits, skin,
+                      event log warnings on/off
   presets.json        saved presets
   Engines\            the test tools - do not change or remove
   Logotypes\          put certificate logos (.png, .jpg) here
@@ -200,7 +218,7 @@ Folder layout
   reports\            PDF certificates (created by the app)
 
 Each run: results\<run_id>\  (run_id is the start date and time, e.g. 20261019_181729)
-  run_summary.json            verdict, issues and per-phase results
+  run_summary.json            verdict, issues, warnings worth checking and per-phase results
   telemetry_summary.json      maximum temperatures and loads, per phase
   logs\engine_meta.json       per-phase status, exit code, times, command line, log paths
   logs\<phase>_stdout.log     the main log of each phase (engine output, stderr marked

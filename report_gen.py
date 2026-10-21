@@ -22,8 +22,8 @@ METHODOLOGY_TEXT = (
     "Passing these tests indicates strong overall system stability."
 )
 EVENT_LOG_TEXT = (
-    " Throughout every test, the Windows event log was monitored for hardware errors corrected by the "
-    "system (WHEA), graphics driver resets and storage controller errors."
+    " Throughout every test, the Windows event log was monitored for uncorrected hardware errors (WHEA) "
+    "and graphics driver resets."
 )
 
 

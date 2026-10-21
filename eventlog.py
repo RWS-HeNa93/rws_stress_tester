@@ -14,12 +14,13 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 EVENT_NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
 QUERY_TIMEOUT_SECONDS = 20
 QUERY_MAX_EVENTS = 200
-# Events are logged a moment after they happen and clocks are compared at second precision.
-QUERY_MARGIN_SECONDS = 60
 POLL_SECONDS = 30.0
 # Some systems log a corrected PCIe error every second; report the first few, count the rest.
 MAX_REPORTED_PER_WATCHER = 10
 MESSAGE_MAX_CHARS = 300
+
+FAILURE_NOTE = "This points to instability, which can come from the hardware or from software such as drivers or BIOS settings."
+WARNING_NOTE = "Worth checking, but not by itself a sign of a hardware or software failure."
 
 
 @dataclass(frozen=True)
@@ -28,13 +29,31 @@ class EventSource:
     meaning: str
     max_level: int = 3  # 1 critical, 2 error, 3 warning
     event_ids: frozenset[int] | None = None
+    # Events at or below this level fail the phase; the rest are only warnings worth checking.
+    failure_max_level: int = 0
+    failure_meaning: str = ""
+    # A failure only while the phase loads the GPU, otherwise a warning.
+    failure_needs_gpu_load: bool = False
+    # Logged on the boot after a crash, so only crash recovery looks for it.
+    after_restart: bool = False
 
 
 # System-log sources that record hardware trouble even when the stress engine itself notices nothing:
-# corrected CPU / memory / PCIe errors, GPU driver resets, storage controller resets and I/O retries.
+# CPU / memory / PCIe errors, GPU driver resets, storage controller resets and I/O retries.
 WATCHED_EVENT_SOURCES = (
-    EventSource("Microsoft-Windows-WHEA-Logger", "hardware error (WHEA) reported by the CPU, memory or PCIe"),
-    EventSource("Display", "the display driver stopped responding and was reset (TDR)", event_ids=frozenset({4101})),
+    EventSource(
+        "Microsoft-Windows-WHEA-Logger",
+        "corrected hardware error (WHEA) reported by the CPU, memory or PCIe",
+        failure_max_level=2,
+        failure_meaning="uncorrected hardware error (WHEA) reported by the CPU, memory or PCIe",
+    ),
+    EventSource(
+        "Display",
+        "the display driver stopped responding and was reset (TDR)",
+        event_ids=frozenset({4101}),
+        failure_max_level=3,
+        failure_needs_gpu_load=True,
+    ),
     EventSource("nvlddmkm", "NVIDIA graphics driver error", max_level=2),
     EventSource("amdkmdag", "AMD graphics driver error", max_level=2),
     EventSource("disk", "disk I/O error or retry"),
@@ -42,9 +61,20 @@ WATCHED_EVENT_SOURCES = (
     EventSource("storahci", "SATA controller error or reset"),
     EventSource("Ntfs", "file system error", max_level=2),
     EventSource("Microsoft-Windows-Ntfs", "file system error", max_level=2),
-    # Logged after the restart that follows a crash; found by crash recovery.
-    EventSource("Microsoft-Windows-Kernel-Power", "the system restarted without shutting down cleanly", event_ids=frozenset({41})),
-    EventSource("Microsoft-Windows-WER-SystemErrorReporting", "the system crashed with a blue screen", event_ids=frozenset({1001})),
+    EventSource(
+        "Microsoft-Windows-Kernel-Power",
+        "the system restarted without shutting down cleanly",
+        event_ids=frozenset({41}),
+        failure_max_level=3,
+        after_restart=True,
+    ),
+    EventSource(
+        "Microsoft-Windows-WER-SystemErrorReporting",
+        "the system crashed with a blue screen",
+        event_ids=frozenset({1001}),
+        failure_max_level=3,
+        after_restart=True,
+    ),
 )
 SOURCES_BY_PROVIDER = {source.provider.lower(): source for source in WATCHED_EVENT_SOURCES}
 
@@ -56,41 +86,55 @@ class HardwareEvent:
     provider: str
     event_id: int
     level: int
-    meaning: str
     message: str
 
-    def describe(self) -> str:
+    @property
+    def source(self) -> EventSource:
+        return SOURCES_BY_PROVIDER[self.provider.lower()]
+
+    def is_failure(self, gpu_under_load: bool) -> bool:
+        """True when the event shows the hardware failing under test rather than something worth checking."""
+        source = self.source
+        if self.level > source.failure_max_level:
+            return False
+        return gpu_under_load or not source.failure_needs_gpu_load
+
+    def describe(self, failure: bool) -> str:
         local_time = self.time_created.astimezone().strftime("%H:%M:%S")
-        text = f"Windows logged at {local_time}: {self.meaning} ({self.provider} event {self.event_id})"
-        return f"{text}: {self.message}" if self.message else text
+        meaning = (self.source.failure_meaning or self.source.meaning) if failure else self.source.meaning
+        text = f"Windows logged at {local_time}: {meaning} ({self.provider} event {self.event_id})"
+        if self.message:
+            text = f"{text}: {self.message}"
+        return f"{text.rstrip('.')}. {FAILURE_NOTE if failure else WARNING_NOTE}"
+
+
+@dataclass(frozen=True)
+class EventPage:
+    events: list[HardwareEvent]  # watched events, oldest first
+    last_record_id: int  # newest record the query returned, watched or not
+    full: bool  # the query hit its event limit, so more events may follow
 
 
 class EventLogUnavailable(Exception):
     pass
 
 
-def _build_query(window_ms: int) -> str:
-    providers = " or ".join(f"@Name='{source.provider}'" for source in WATCHED_EVENT_SOURCES)
+def _build_query(after_record_id: int, include_after_restart: bool) -> str:
+    providers = " or ".join(
+        f"@Name='{source.provider}'"
+        for source in WATCHED_EVENT_SOURCES
+        if include_after_restart or not source.after_restart
+    )
     return (
         f"*[System[Provider[{providers}] and (Level=1 or Level=2 or Level=3)"
-        f" and TimeCreated[timediff(@SystemTime) <= {window_ms}]]]"
+        f" and EventRecordID > {after_record_id}]]"
     )
 
 
-def query_hardware_events(since: datetime) -> list[HardwareEvent]:
-    """Watched System-log events created at or after `since` (aware or local-naive), oldest first."""
-    if os.name != "nt":
-        return []
-    since_utc = since.astimezone(timezone.utc)
-    window_ms = int(((datetime.now(timezone.utc) - since_utc).total_seconds() + QUERY_MARGIN_SECONDS) * 1000)
+def _run_wevtutil(arguments: list[str]) -> str:
     try:
         completed = subprocess.run(
-            [
-                "wevtutil", "qe", "System",
-                f"/q:{_build_query(max(window_ms, 1000))}",
-                "/f:RenderedXml",
-                f"/c:{QUERY_MAX_EVENTS}",
-            ],
+            ["wevtutil", "qe", "System", *arguments],
             capture_output=True,
             timeout=QUERY_TIMEOUT_SECONDS,
             creationflags=CREATE_NO_WINDOW,
@@ -100,7 +144,39 @@ def query_hardware_events(since: datetime) -> list[HardwareEvent]:
     if completed.returncode != 0:
         detail = _decode(completed.stderr).strip() or f"wevtutil exit code {completed.returncode}"
         raise EventLogUnavailable(detail)
-    return [event for event in parse_events(_decode(completed.stdout)) if event.time_created >= since_utc]
+    return _decode(completed.stdout)
+
+
+def latest_record_id() -> int:
+    """Number of the newest System-log event. Later queries only look at events numbered after it,
+    which, unlike timestamps, stays correct when the clock is wrong or changes."""
+    if os.name != "nt":
+        return 0
+    record_ids = _record_ids(_run_wevtutil(["/rd:true", "/c:1", "/f:xml"]))
+    return max(record_ids, default=0)
+
+
+def query_hardware_events(after_record_id: int, include_after_restart: bool = False) -> EventPage:
+    """Watched System-log events numbered after `after_record_id`, at most QUERY_MAX_EVENTS of them."""
+    if os.name != "nt":
+        return EventPage([], after_record_id, False)
+    xml_text = _run_wevtutil(
+        [
+            f"/q:{_build_query(after_record_id, include_after_restart)}",
+            "/f:RenderedXml",
+            f"/c:{QUERY_MAX_EVENTS}",
+        ]
+    )
+    record_ids = _record_ids(xml_text)
+    return EventPage(
+        events=parse_events(xml_text),
+        last_record_id=max(record_ids, default=after_record_id),
+        full=len(record_ids) >= QUERY_MAX_EVENTS,
+    )
+
+
+def _record_ids(xml_text: str) -> list[int]:
+    return [int(value) for value in re.findall(r"<EventRecordID>(\d+)</EventRecordID>", xml_text)]
 
 
 def _decode(raw: bytes) -> str:
@@ -126,7 +202,7 @@ def parse_events(xml_text: str) -> list[HardwareEvent]:
         event = _parse_event(element)
         if event is not None:
             events.append(event)
-    events.sort(key=lambda e: (e.time_created, e.record_id))
+    events.sort(key=lambda e: e.record_id)
     return events
 
 
@@ -162,7 +238,6 @@ def _parse_event(element: ET.Element) -> HardwareEvent | None:
         provider=provider,
         event_id=event_id,
         level=level,
-        meaning=source.meaning,
         message=_compact_message(message),
     )
 
@@ -190,29 +265,36 @@ def _compact_message(message: str) -> str:
 
 
 class HardwareEventWatcher:
-    """Polls the System log in the background while a phase runs and reports each new event once."""
+    """Polls the System log in the background while a phase runs and reports each new event once.
+
+    Failures (uncorrected hardware errors, GPU driver resets under GPU load) are always reported;
+    warnings worth checking only when `report_warnings` is set.
+    """
 
     def __init__(
         self,
-        since: datetime,
-        on_event: Callable[[HardwareEvent], None],
+        after_record_id: int,
+        on_event: Callable[[HardwareEvent, bool], None],
         on_unavailable: Callable[[str], None],
-        seen_record_ids: set[int],
-        query: Callable[[datetime], list[HardwareEvent]] = query_hardware_events,
+        gpu_under_load: bool,
+        report_warnings: bool,
+        query: Callable[[int], EventPage] = query_hardware_events,
         poll_seconds: float = POLL_SECONDS,
     ) -> None:
-        self.since = since
+        self.after_record_id = after_record_id
         self._on_event = on_event
         self._on_unavailable = on_unavailable
-        self._seen = seen_record_ids
+        self._gpu_under_load = gpu_under_load
+        self._report_warnings = report_warnings
         self._query = query
         self._poll_seconds = poll_seconds
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._unavailable_reported = False
         self._thread: threading.Thread | None = None
-        self.reported = 0
-        self.suppressed = 0
+        self._reported = {True: 0, False: 0}  # keyed by is_failure
+        self.suppressed_failures = 0
+        self.suppressed_warnings = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="event-log-watcher", daemon=True)
@@ -228,22 +310,34 @@ class HardwareEventWatcher:
 
     def check(self) -> None:
         with self._lock:
-            try:
-                events = self._query(self.since)
-            except EventLogUnavailable as exc:
-                if not self._unavailable_reported:
-                    self._unavailable_reported = True
-                    self._on_unavailable(str(exc))
-                return
-            for event in events:
-                if event.record_id in self._seen:
-                    continue
-                self._seen.add(event.record_id)
-                if self.reported >= MAX_REPORTED_PER_WATCHER:
-                    self.suppressed += 1
-                    continue
-                self.reported += 1
-                self._on_event(event)
+            while True:
+                try:
+                    page = self._query(self.after_record_id)
+                except EventLogUnavailable as exc:
+                    if not self._unavailable_reported:
+                        self._unavailable_reported = True
+                        self._on_unavailable(str(exc))
+                    return
+                for event in page.events:
+                    self._report(event)
+                if page.last_record_id <= self.after_record_id:
+                    return
+                self.after_record_id = page.last_record_id
+                if not page.full:
+                    return
+
+    def _report(self, event: HardwareEvent) -> None:
+        failure = event.is_failure(self._gpu_under_load)
+        if not failure and not self._report_warnings:
+            return
+        if self._reported[failure] >= MAX_REPORTED_PER_WATCHER:
+            if failure:
+                self.suppressed_failures += 1
+            else:
+                self.suppressed_warnings += 1
+            return
+        self._reported[failure] += 1
+        self._on_event(event, failure)
 
     def _run(self) -> None:
         while not self._stop.wait(self._poll_seconds):

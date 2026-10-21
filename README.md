@@ -71,13 +71,18 @@ Phases always run in this order. Each one can be switched on or off and given it
 
 A phase fails if:
 - y-cruncher reports a wrong result, or FurMark finds a rendering artifact
-- Windows logs a WHEA hardware error, a display driver reset (TDR), an NVIDIA/AMD driver error, or
-  a disk, NVMe or file system error (the System event log is checked every 30 seconds)
+- Windows logs an uncorrected WHEA hardware error, or a display driver reset (TDR) while the phase
+  loads the GPU (the System event log is checked every 30 seconds)
 - an engine crashes or quits early
 - a temperature goes over the thermal limit. The limits can be lowered but never raised above the
   built-in ceilings (CPU 105 °C, GPU 95 °C)
 - the PC restarts or loses power. The next launch marks the phase **FAILED (System Crash)** and
   shows what Windows recorded, such as the blue screen code or WHEA errors
+
+Milder Windows events, such as corrected WHEA errors, NVIDIA/AMD driver errors and disk, NVMe or
+file system errors, are shown in yellow in the console and phase logs as worth checking. They do
+not fail a phase, change the verdict or appear on the certificate, and can be switched off on the
+setup screen.
 
 If every selected phase passes, the verdict is **CERTIFIED STABLE**, whatever the test durations,
 so choosing sensible durations is up to the technician. Each run also saves per-phase logs and
