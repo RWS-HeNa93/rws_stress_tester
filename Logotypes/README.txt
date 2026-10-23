@@ -11,14 +11,14 @@ Supported formats:
 
 How this folder is used in the app:
 1. Launch RWS_StressTester.exe.
-2. On the setup screen, go to the Stability Certificate section.
+2. On the setup screen, go to the Certificate panel.
 3. Use the Browse button next to the Logo field.
 4. Select an image from this Logotypes folder.
-5. Optionally enable Customer Name and Machine Name fields.
+5. Optionally tick Customer and Machine and enter the names to show on the certificate.
 6. Start the diagnostics run.
 
 What happens next:
-- The selected logo path is saved in settings.json.
+- The selected logo path is saved in settings.json when the run starts.
 - If report generation is enabled, the chosen image is placed at the top of the PDF certificate.
 - Generated PDF reports are written to the reports\ folder.
 

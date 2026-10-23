@@ -70,10 +70,11 @@ Phases always run in this order. Each one can be switched on or off and given it
 ## How a run passes or fails
 
 A phase fails if:
-- y-cruncher reports a wrong result, or FurMark finds a rendering artifact
+- y-cruncher reports a wrong result, FurMark finds a rendering artifact, or DiskSpd reports an
+  I/O error or a single I/O that took 10 seconds or longer
 - Windows logs an uncorrected WHEA hardware error, or a display driver reset (TDR) while the phase
   loads the GPU (the System event log is checked every 30 seconds)
-- an engine crashes or quits early
+- an engine crashes, quits early or prints an error
 - a temperature goes over the thermal limit. The limits can be lowered but never raised above the
   built-in ceilings (CPU 105 °C, GPU 95 °C)
 - the PC restarts or loses power. The next launch marks the phase **FAILED (System Crash)** and
@@ -186,6 +187,7 @@ Administrator rights are needed to read hardware sensors. The app uses `Engines\
 | `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses\` | License for this project and for the bundled third-party software, shipped in the package |
 | `build.bat` | Builds the `.exe` and assembles `dist\RWS_StressTester\` |
 | `.github/workflows/build-windows.yml` | The same build on GitHub Actions |
+| `.github/scripts/` | Checks the workflow runs: telemetry loads from a downloaded ZIP and its sensor session can be reopened |
 
 Notes:
 - `Engines\y-cruncher\` contains 32-bit `msvcp140.dll` and `vcruntime140.dll` (14.44). The

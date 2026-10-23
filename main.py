@@ -8,9 +8,9 @@ def _get_root() -> Path:
     """Return the application root directory.
 
     When running from source, this is the folder containing main.py.
-    When frozen by PyInstaller (--onedir), __file__ lives inside _internal\
-    but the Engines folder and config files sit next to the .exe, so we use
-    sys.executable's parent instead.
+    When frozen by PyInstaller (--onefile), __file__ lives in a temporary
+    extraction folder, but the Engines folder and config files sit next to
+    the .exe, so we use sys.executable's parent instead.
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent

@@ -48,17 +48,17 @@ RAM  - Fill to (%) and Safety margin (GB): how full the memory gets during the t
   y-cruncher tests VT3, FFTv4, N63 with enough memory to bring the whole system's memory
   use to the Fill to percentage (default 90%), while always leaving at least the safety
   margin free for Windows and this app (default 2 GB). The amount is worked out when the
-  phase starts, from what is in use at that moment, and the certificate shows it in GB.
+  phase starts, from what is in use at that moment, and shown in the console.
   The safety margin wins when the two disagree: on a 16 GB PC with a 2 GB margin, memory
   stops at about 88%. Finds unstable RAM, memory controller and fabric settings
   (XMP/EXPO, timings, SoC voltage). Start is blocked if Fill to is not 10-100%, the margin
   is below 0.5 GB, or less than 1 GB would be left to test. If other programs use up the
   memory before the phase starts, the phase fails with a note saying so.
 
-GPU  - Res: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
+GPU  - Resolution: render resolution, e.g. 1280x720 (also used by VRAM and PSU)
   FurMark at full load with its artifact scanner, which checks every frame for corruption.
 
-VRAM - Size (GB): how much video memory to fill
+VRAM - GB: how much video memory to fill
   The same FurMark load while filling the chosen amount of video memory with data that is
   read back every frame. Faulty or overheating video memory shows up as artifacts or as a
   driver crash or reset.
@@ -110,12 +110,18 @@ phase log and listed on the certificate.
                                                settings
   Display driver reset (TDR) during a GPU,     GPU instability, power delivery, but also the
   VRAM or PSU phase                            graphics driver
-  A single storage I/O taking 10 s or longer   Drive, cable, controller or failing media
+  DiskSpd reports an I/O error, or a single    Drive, cable, controller or failing media
+  storage I/O takes 10 s or longer
   An engine crashes or quits early             The message gives the exit code in plain words;
                                                crashes under load usually mean instability
+  Any other error line in an engine's output   The line, in red in the phase log, names the
+  (error, fault, corruption, mismatch...)      problem
   Temperature above the thermal limit          Cooling. The run stops (THERMAL_ABORT)
   The PC restarts or loses power               Shown on the next launch as FAILED (System
                                                Crash), see below
+
+If an engine keeps printing errors, the first 10 error lines per phase are listed and the rest
+are counted; every one of them stays in red in the console and the phase log.
 
 Event log monitoring
   During every phase the app checks the Windows System event log every 30 seconds and at the
