@@ -623,7 +623,6 @@ class AppFilePickerDialog(ctk.CTkToplevel):
         self.location_targets = self._build_location_targets()
         self.location_map = {label: path for label, path in self.location_targets}
         self.location_var = ctk.StringVar(value="")
-        self.current_path_var = ctk.StringVar(value=str(self.current_dir))
         self.selected_path_var = ctk.StringVar(value=str(self.selected_path) if self.selected_path else "")
 
         self.title(title)
@@ -921,10 +920,6 @@ class AppFilePickerDialog(ctk.CTkToplevel):
         self.image_cache[cache_key] = folder_image
         return folder_image
 
-    def _set_status(self, text: str, color: str = TEXT_MUTED) -> None:  # noqa: ARG002
-        """Status bar was removed; kept for compatibility with internal callers."""
-        return
-
     def _set_selected_path(self, path: Path | None) -> None:
         self.selected_path = path
         self.selected_path_var.set(str(path) if path else "")
@@ -941,38 +936,9 @@ class AppFilePickerDialog(ctk.CTkToplevel):
         except Exception:
             return
 
-    def _go_to_path(self) -> None:
-        raw_path = self.current_path_var.get().strip().strip('"')
-        if not raw_path:
-            self._set_status("Enter a folder path or an image file path.", DANGER)
-            return
-
-        target = Path(raw_path)
-        if target.is_dir():
-            self._open_directory(target)
-            return
-        if target.is_file():
-            if not self._is_allowed_file(target):
-                self._set_status("Only PNG and JPG logo files are supported.", DANGER)
-                return
-            self.current_dir = target.parent
-            self._set_selected_path(target)
-            self._refresh_listing(scroll_to_top=True)
-            return
-
-        self._set_status("That path does not exist.", DANGER)
-
-    def _go_up(self) -> None:
-        parent = self.current_dir.parent
-        if parent == self.current_dir:
-            self._set_status("Already at the top of this drive.")
-            return
-        self._open_directory(parent)
-
     def _open_directory(self, path: Path) -> None:
         target = Path(path)
         if not target.exists() or not target.is_dir():
-            self._set_status("Unable to open that folder.", DANGER)
             return
         self.current_dir = target
         self._set_selected_path(None)
@@ -980,7 +946,6 @@ class AppFilePickerDialog(ctk.CTkToplevel):
 
     def _select_file(self, path: Path) -> None:
         if not self._is_allowed_file(path):
-            self._set_status("Only PNG and JPG logo files are supported.", DANGER)
             return
         self._set_selected_path(path)
         self._refresh_listing(scroll_to_top=False)
@@ -993,27 +958,18 @@ class AppFilePickerDialog(ctk.CTkToplevel):
         for widget in self.list_frame.winfo_children():
             widget.destroy()
 
-        self.current_path_var.set(str(self.current_dir))
         self._sync_location_menu()
         has_parent = self.current_dir.parent != self.current_dir
 
         try:
             entries = [entry for entry in self.current_dir.iterdir() if not self._is_hidden_path(entry)]
-        except OSError as exc:
-            self._set_status(f"Unable to open folder: {exc}", DANGER)
+        except OSError:
             return
 
         folders = sorted([entry for entry in entries if entry.is_dir()], key=lambda item: item.name.lower())
         files = sorted(
             [entry for entry in entries if self._is_allowed_file(entry)],
             key=lambda item: item.name.lower(),
-        )
-
-        folder_count = len(folders)
-        file_count = len(files)
-        self._set_status(
-            f"{folder_count} folder{'s' if folder_count != 1 else ''} | "
-            f"{file_count} image file{'s' if file_count != 1 else ''}"
         )
 
         if self.selected_path is not None and self.selected_path.parent != self.current_dir:
@@ -1252,7 +1208,6 @@ class AppFilePickerDialog(ctk.CTkToplevel):
 
     def _submit(self) -> None:
         if self.selected_path is None:
-            self._set_status("Select an image file first.", DANGER)
             return
         self.result = str(self.selected_path)
         self.destroy()
@@ -1325,6 +1280,8 @@ class LogViewerModal(ctk.CTkToplevel):
                 justify="left",
                 wraplength=560 if span == 2 else 270,
             ).grid(row=1, column=0, sticky="w")
+        # The PSU phase names both a CPU and a GPU, which takes the fields onto a third row.
+        next_row = math.ceil(len(fields) / 3)
         if label_issues := [str(issue) for issue in meta.get("phase_issues") or []]:
             issues_text = "\n".join(f"• {issue}" for issue in label_issues[:4])
             if len(label_issues) > 4:
@@ -1337,7 +1294,8 @@ class LogViewerModal(ctk.CTkToplevel):
                 anchor="w",
                 justify="left",
                 wraplength=900,
-            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 10))
+            ).grid(row=next_row, column=0, columnspan=3, sticky="w", pady=(0, 10))
+            next_row += 1
         if label_warnings := [str(warning) for warning in meta.get("phase_warnings") or []]:
             warnings_text = "\n".join(f"• {warning}" for warning in label_warnings[:4])
             if len(label_warnings) > 4:
@@ -1350,9 +1308,10 @@ class LogViewerModal(ctk.CTkToplevel):
                 anchor="w",
                 justify="left",
                 wraplength=900,
-            ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 10))
+            ).grid(row=next_row, column=0, columnspan=3, sticky="w", pady=(0, 10))
+            next_row += 1
         ctk.CTkLabel(details_body, text="COMMAND", font=ui_font(10, "semibold"), text_color=TEXT_FAINT, anchor="w").grid(
-            row=4, column=0, columnspan=3, sticky="w"
+            row=next_row, column=0, columnspan=3, sticky="w"
         )
         ctk.CTkLabel(
             details_body,
@@ -1362,7 +1321,7 @@ class LogViewerModal(ctk.CTkToplevel):
             justify="left",
             anchor="w",
             wraplength=900,
-        ).grid(row=5, column=0, columnspan=3, sticky="w")
+        ).grid(row=next_row + 1, column=0, columnspan=3, sticky="w")
 
         self.textbox = ctk.CTkTextbox(
             self,
@@ -1645,7 +1604,7 @@ class TelemetrySettingsWindow(ctk.CTkToplevel):
         self.app._apply_auto_assignment(keep_working=False)
 
     def _install_pawnio_driver(self) -> None:
-        self.app._launch_pawnio_installer(prompt_first=False)
+        self.app._launch_pawnio_installer()
 
     def _approve(self) -> None:
         self.app._confirm_sensor_assignment()
@@ -1780,7 +1739,6 @@ class StressTesterApp(ctk.CTk):
         }
         self.telemetry_inventory: list[dict[str, Any]] = []
         self.telemetry_status_summary = ""
-        self.telemetry_status_brief = ""
         self.telemetry_status_color = WARNING
         self.telemetry_header_status_text = ""
         self.telemetry_header_status_color = WARNING
@@ -2413,7 +2371,6 @@ class StressTesterApp(ctk.CTk):
         candidate_paths = [
             self.root_path / "Engines" / "PawnIO_Driver" / "PawnIO_setup.exe",
             self.root_path / "Engines" / "PawnIO_setup.exe",
-            self.root_path / "Engines" / "PawnIo.exe",
             self.root_path / "Engines" / "PawnIO.exe",
         ]
         for path in candidate_paths:
@@ -2421,9 +2378,6 @@ class StressTesterApp(ctk.CTk):
                 return path
 
         for path in (self.root_path / "Engines").rglob("*PawnIO*.exe"):
-            if path.is_file():
-                return path
-        for path in (self.root_path / "Engines").rglob("*PawnIo*.exe"):
             if path.is_file():
                 return path
         return None
@@ -2483,9 +2437,9 @@ class StressTesterApp(ctk.CTk):
             ],
             default_result=False,
         )
-        return bool(should_install) and self._launch_pawnio_installer(prompt_first=False)
+        return bool(should_install) and self._launch_pawnio_installer()
 
-    def _launch_pawnio_installer(self, prompt_first: bool = True) -> bool:
+    def _launch_pawnio_installer(self) -> bool:
         installer_path = self.pawnio_installer_path
         if installer_path is None or not installer_path.exists():
             self._show_error(
@@ -2493,16 +2447,6 @@ class StressTesterApp(ctk.CTk):
                 "PawnIO installer was not found in the Engines folder.",
             )
             return False
-
-        if prompt_first:
-            should_launch = self._ask_yes_no(
-                "Install PawnIO Driver",
-                "Launch the PawnIO installer now?",
-                confirm_label="Launch",
-                cancel_label="Cancel",
-            )
-            if not should_launch:
-                return False
 
         result = ctypes.windll.shell32.ShellExecuteW(
             None,
@@ -2544,7 +2488,6 @@ class StressTesterApp(ctk.CTk):
                 category.key: UNASSIGNED_SENSOR_OPTION for category in TELEMETRY_CATEGORIES
             }
             self.telemetry_status_summary = f"Telemetry discovery failed: {exc}"
-            self.telemetry_status_brief = "Sensor scan failed"
             self.telemetry_status_color = DANGER
             self.telemetry_header_status_text = "●  Sensor scan failed"
             self.telemetry_header_status_color = DANGER
@@ -2684,16 +2627,6 @@ class StressTesterApp(ctk.CTk):
             parts.append("Telemetry mappings refreshed.")
 
         self.telemetry_status_summary = " ".join(parts)
-        brief_parts = [f"{sensor_count} sensors detected"]
-        if invalid_saved_categories:
-            brief_parts.append("remap needed")
-        elif unassigned_categories:
-            brief_parts.append("mapping incomplete")
-        elif no_data_categories:
-            brief_parts.append("some readings offline")
-        elif pawnio_problem:
-            brief_parts.append("PawnIO missing" if pawnio_problem == "missing" else "PawnIO not running")
-        self.telemetry_status_brief = " | ".join(brief_parts)
         self.telemetry_status_color = (
             DANGER
             if invalid_saved_categories
@@ -2991,7 +2924,7 @@ class StressTesterApp(ctk.CTk):
             return None
         return value if value > 0 else None
 
-    def _validate_start_inputs(self, payload: dict[str, Any]) -> tuple[dict[str, int], float, int] | None:
+    def _validate_start_inputs(self, payload: dict[str, Any]) -> tuple[dict[str, int], float, float, int] | None:
         catalog = self.orchestrator._test_catalog()
         selections: dict[str, int] = {}
         invalid_durations: list[str] = []

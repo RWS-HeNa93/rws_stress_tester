@@ -150,10 +150,6 @@ class TelemetryMonitor:
             self._sensor_mappings = normalized
         return normalized.copy()
 
-    def get_sensor_mappings(self) -> dict[str, str | None]:
-        with self._telemetry_lock:
-            return self._sensor_mappings.copy()
-
     def mapped_hardware_name(self, category_key: str) -> str:
         """Name of the hardware behind the sensor assigned to a reading, as of the last poll."""
         # No lock: both dicts are replaced wholesale, never mutated, and a poll can hold the lock for a while.
@@ -167,36 +163,6 @@ class TelemetryMonitor:
             inventory = self._collect_sensor_inventory()
             self._last_sensor_inventory = inventory
             return sorted(inventory.values(), key=lambda sensor: (sensor.sensor_type, sensor.hardware_name, sensor.sensor_name))
-
-    def validate_sensor_mappings(self, mappings: dict[str, Any] | None = None) -> dict[str, list[str]]:
-        with self._telemetry_lock:
-            self._open_computer()
-            inventory = self._collect_sensor_inventory()
-            self._last_sensor_inventory = inventory
-            effective_mappings = self._normalize_mappings(mappings if mappings is not None else self._sensor_mappings)
-
-        unassigned: list[str] = []
-        invalid: list[str] = []
-        valid: list[str] = []
-
-        for category in TELEMETRY_CATEGORIES:
-            sensor_id = effective_mappings.get(category.key)
-            if not sensor_id:
-                unassigned.append(category.label)
-                continue
-
-            sensor = inventory.get(sensor_id)
-            if (
-                sensor is None
-                or sensor.sensor_type != category.sensor_type
-                or sensor.hardware_role not in category.hardware_roles
-            ):
-                invalid.append(category.label)
-                continue
-
-            valid.append(category.label)
-
-        return {"valid": valid, "invalid": invalid, "unassigned": unassigned}
 
     def get_pawnio_status(self) -> dict[str, Any]:
         return detect_pawnio_status()
@@ -413,17 +379,6 @@ class TelemetryMonitor:
         if normalized in {"storage", "hdd", "ssd"}:
             return "storage"
         return "other"
-
-    @staticmethod
-    def _normalize_mappings(mappings: dict[str, Any] | None) -> dict[str, str | None]:
-        normalized = DEFAULT_TELEMETRY_MAPPINGS.copy()
-        if not isinstance(mappings, dict):
-            return normalized
-
-        for key in normalized:
-            value = mappings.get(key)
-            normalized[key] = str(value).strip() if value else None
-        return normalized
 
     @staticmethod
     def _read_sensor_value(sensor: Any) -> float | None:

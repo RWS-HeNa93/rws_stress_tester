@@ -118,6 +118,9 @@ VRAM_HEADROOM_GB = 1.0
 DISKSPD_MAX_FILE_GIB = 8
 DISKSPD_FREE_SPACE_FRACTION = 0.2
 
+# A failing engine can print an error on every line; list the first few per phase, count the rest.
+MAX_ENGINE_ERRORS_LISTED = 10
+
 THERMAL_ABORT_MESSAGE = "Thermal Failure - Aborted"
 CRASH_STATUS = "FAILED (System Crash)"
 STDERR_PREFIX = "[STDERR] "
@@ -370,6 +373,7 @@ class StressOrchestrator:
         self._phase_issues: list[str] = []    # per-test issues, reset before each phase
         self.warnings: list[str] = []         # worth checking, never fail a test
         self._phase_warnings: list[str] = []
+        self._phase_engine_errors = 0         # error lines engines printed this phase, listed or not
         self.max_cpu_temp = 0.0
         self.max_gpu_temp = 0.0
         self.max_ram_load = 0.0
@@ -522,9 +526,6 @@ class StressOrchestrator:
             }
             for sensor in self.telemetry.list_available_sensors()
         ]
-
-    def validate_telemetry_mappings(self, mappings: dict[str, Any] | None = None) -> dict[str, list[str]]:
-        return self.telemetry.validate_sensor_mappings(mappings)
 
     def get_pawnio_status(self) -> dict[str, Any]:
         return self.telemetry.get_pawnio_status()
@@ -780,6 +781,7 @@ class StressOrchestrator:
         with self._state_lock:
             self._phase_issues = []  # reset per-test issues — do NOT inherit from prior phases
             self._phase_warnings = []
+            self._phase_engine_errors = 0
             self._phase_max = self._empty_phase_max()
         self._phase_gpu_name = ""
         self._write_state_file(test.key)
@@ -839,8 +841,9 @@ class StressOrchestrator:
                     tested_hardware=self._tested_hardware(test),
                 )
 
-                for process in processes:
-                    rc = process.poll()
+                # One poll per process per pass, so an engine that exits during the pass is still checked.
+                exit_codes = [process.poll() for process in processes]
+                for process, rc in zip(processes, exit_codes):
                     if rc is None or process.pid in exit_checked or self.stop_event.is_set():
                         continue
                     exit_checked.add(process.pid)
@@ -861,7 +864,7 @@ class StressOrchestrator:
                             app_notes,
                         )
 
-                if all(p.poll() is not None for p in processes):
+                if all(rc is not None for rc in exit_codes):
                     break
                 if now >= grace_deadline:
                     break
@@ -927,6 +930,20 @@ class StressOrchestrator:
             if test.key in DISKSPD_TEST_KEYS:
                 self._cleanup_diskspd_target(test.target_drive)
             self.clear_state_file()
+
+        # Counted once the output monitor has finished, so every engine line is included.
+        with self._state_lock:
+            unlisted_engine_errors = self._phase_engine_errors - MAX_ENGINE_ERRORS_LISTED
+        if unlisted_engine_errors > 0 and not self.manual_abort:
+            engine_notes: list[str] = []
+            self._flag_phase_issue(
+                f"{test.label}: the engine output had {unlisted_engine_errors} more error line(s) not listed here; "
+                "see the phase log.",
+                engine_notes,
+            )
+            self._append_notes_to_log(app_log_path, engine_notes)
+            if status == "PASSED":
+                status = "FAILED"
 
         if test.key in FURMARK_TEST_KEYS and commands:
             furmark_log_path, artifact_lines = self._collect_furmark_log(test.key, test_started_at)
@@ -1205,23 +1222,25 @@ class StressOrchestrator:
         finally:
             line_queue.put(None)
 
-    def _is_error_line(self, line: str, test_key: str) -> bool:
-        return is_error_line(line, test_key)
-
     def _handle_engine_line(self, line: str, f: Any, stream_name: str, test_key: str = "") -> None:
         if not line.strip():
             return
 
         full_line = f"{STDERR_PREFIX}{line}" if stream_name == "stderr" else line
-        is_error = self._is_error_line(line, test_key)
+        is_error = is_error_line(line, test_key)
 
         self._emit(EVENT_LOG, message=full_line, is_error=is_error)
         f.write(full_line + "\n")
         f.flush()
 
         if is_error:
-            self._record_issue(f"Engine output flagged issue: {line}")
-            self._emit(EVENT_ALERT, message=f"Engine output error: {line}")
+            # Every error line stays red in the console and the log; only the first few become issues.
+            with self._state_lock:
+                self._phase_engine_errors += 1
+                listed = self._phase_engine_errors <= MAX_ENGINE_ERRORS_LISTED
+            if listed:
+                self._record_issue(f"Engine output flagged issue: {line}")
+                self._emit(EVENT_ALERT, message=f"Engine output error: {line}")
 
     @staticmethod
     def _empty_phase_max() -> dict[str, float]:
