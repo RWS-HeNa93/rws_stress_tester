@@ -61,24 +61,15 @@ def build_stability_report(output_path: Path, settings: dict, summary: dict) -> 
     story.append(Spacer(1, 4 * mm))
 
     story.append(Paragraph("Test Pattern Summary", styles["Heading2"]))
-    rows = [["Test", "Duration", "Memory Tested", "Status"]]
+    rows = [["Test", "Duration", "Status"]]
     for row in summary["tests"]:
         duration_minutes = row.get("duration_minutes") or 0
-        ram_gb = row.get("selected_ram_gb") or 0
-        vram_gb = row.get("selected_vram_gb") or 0
-        if ram_gb:
-            memory = f"{ram_gb:g} GB"
-        elif vram_gb:
-            memory = f"{vram_gb:g} GB VRAM"
-        else:
-            memory = "-"
         rows.append([
             row.get("label") or row.get("test_name", ""),
             f"{duration_minutes} min" if duration_minutes else "-",
-            memory,
             row["status"],
         ])
-    summary_table = Table(rows, colWidths=[70 * mm, 25 * mm, 25 * mm, 30 * mm])
+    summary_table = Table(rows, colWidths=[95 * mm, 25 * mm, 30 * mm])
     summary_table.setStyle(_table_style())
     story.append(summary_table)
     story.append(Spacer(1, 5 * mm))
